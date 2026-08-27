@@ -1,0 +1,23 @@
+[meta]
+locale = "en-US"
+name = "English (US)"
+version = 1
+
+[messages]
+"status.motd" = "{motd}"
+
+"disconnect.unsupported_protocol" = "This gateway supports {supported}; received protocol {protocol}."
+"disconnect.no_route" = "No transfer target is configured for your connection."
+"disconnect.invalid_username_length" = "Minecraft username must contain 3 to 16 characters."
+"disconnect.invalid_username_characters" = "Minecraft username contains unsupported characters."
+
+"log.first_run" = "First run: released the default configuration at {config} and language files in {directory}. Edit the files and restart."
+"log.language_created" = "Released language file {path}; edit it and restart the gateway to load changes."
+"log.ip2region_downloaded" = "Downloaded the {version} ip2region database to {path}."
+"log.ip2region_download_failed" = "Automatic ip2region database download failed: {error}; continuing with available data."
+"log.no_ip2region" = "No usable ip2region database is available; the default route will be used."
+"log.ip2region_failed" = "ip2region lookup failed; continuing with an empty location."
+"log.connection_limit" = "Connection limit reached; dropping connection."
+"log.starting" = "Starting Minecraft Transfer Gateway (locale: {locale})."
+"log.transfer" = "Transferring player {player} to node {line} ({target})."
+"log.status_proxy_failed" = "Backend status query failed; using the gateway's local status instead: {error}"

@@ -1,0 +1,23 @@
+[meta]
+locale = "zh-CN"
+name = "简体中文"
+version = 1
+
+[messages]
+"status.motd" = "{motd}"
+
+"disconnect.unsupported_protocol" = "此网关支持 {supported}，收到的协议版本是 {protocol}。"
+"disconnect.no_route" = "没有为你的连接配置可用的目标线路。"
+"disconnect.invalid_username_length" = "Minecraft 用户名长度必须为 3 到 16 个字符。"
+"disconnect.invalid_username_characters" = "Minecraft 用户名包含不支持的字符。"
+
+"log.first_run" = "首次运行：已释放默认配置文件 {config} 和语言文件到 {directory}。请编辑配置后重新启动。"
+"log.language_created" = "已释放语言文件 {path}，编辑后重启网关即可加载修改。"
+"log.ip2region_downloaded" = "已下载 {version} ip2region 数据库到 {path}。"
+"log.ip2region_download_failed" = "ip2region 数据库自动下载失败：{error}；将继续使用现有数据。"
+"log.no_ip2region" = "没有可用的 ip2region 数据库；将使用默认线路。"
+"log.ip2region_failed" = "ip2region 查询失败，将使用空位置继续路由。"
+"log.connection_limit" = "连接数已达到上限，已丢弃连接。"
+"log.starting" = "正在启动 Minecraft Transfer 网关（语言：{locale}）。"
+"log.transfer" = "玩家 {player} 将传送到节点 {line}（{target}）。"
+"log.status_proxy_failed" = "子服务器状态查询失败，将使用网关本地状态：{error}"

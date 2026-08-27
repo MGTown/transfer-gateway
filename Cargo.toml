@@ -1,0 +1,18 @@
+[package]
+name = "mc-transfer-gateway"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1"
+ip2region = { git = "https://github.com/lionsoul2014/ip2region.git", rev = "800d19424237f4be5f2081e6cd9547d98f3871c3", package = "ip2region" }
+md-5 = "0.10"
+reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+toml = "0.9"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+uuid = { version = "1", features = ["v4"] }
