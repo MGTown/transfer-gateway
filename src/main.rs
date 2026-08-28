@@ -10,6 +10,7 @@ use mc_transfer_gateway::{
     config::{self, AppConfig, LoggingConfig},
     ip2region::{self, Ip2Region},
     language::{self, Language},
+    security::{self, Security},
     server,
 };
 use tracing::info;
@@ -47,6 +48,7 @@ async fn main() -> Result<()> {
     let mut config = AppConfig::load(&config_path)
         .with_context(|| format!("failed to load {}", config_path.display()))?;
     config.ip2region.resolve_paths(&config_path);
+    config.security.resolve_paths(&config_path);
     init_logging(&config_path, &config.logging)?;
     let language_path = config.language.file_path(&config_path);
     let language_created = language::ensure_file(&language_path, &config.language.locale)?;
@@ -93,6 +95,45 @@ async fn main() -> Result<()> {
         tracing::warn!("{}", language.render("log.no_ip2region", &[]));
     }
 
+    if config.security.auto_download {
+        match security::download_missing(&config.security).await {
+            Ok(downloaded) => {
+                for list in downloaded {
+                    let path = list.path.display().to_string();
+                    info!(
+                        "{}",
+                        language.render(
+                            "log.security_list_downloaded",
+                            &[("kind", list.kind), ("path", path.as_str())],
+                        )
+                    );
+                }
+            }
+            Err(error) => {
+                let error_display = error.to_string();
+                tracing::error!(
+                    "{}",
+                    language.render(
+                        "log.security_list_download_failed",
+                        &[("error", error_display.as_str())],
+                    )
+                );
+            }
+        }
+    }
+    let security = Arc::new(Security::open(&config.security)?);
+    if security.is_enabled() && !security.has_data() {
+        tracing::warn!("{}", language.render("log.no_security_data", &[]));
+    }
+    let (vpn_entries, tor_entries, spam_entries) = security.counts();
+    info!(
+        vpn_entries,
+        tor_entries,
+        spam_entries,
+        enabled = security.is_enabled(),
+        "security blocklists loaded"
+    );
+
     let start_message = language.render(
         "log.starting",
         &[("locale", config.language.locale.as_str())],
@@ -103,7 +144,7 @@ async fn main() -> Result<()> {
         "{start_message}"
     );
 
-    server::run(Arc::new(config), ip2region, language).await
+    server::run(Arc::new(config), ip2region, security, language).await
 }
 
 fn init_logging(config_path: &Path, logging: &LoggingConfig) -> Result<()> {

@@ -34,7 +34,7 @@ lang/zh-CN.toml
 lang/en-US.toml
 ```
 
-接下来编辑 `config.toml`，检查线路地址和端口，再重新启动。第二次启动时，缺失的 ip2region 数据库会按配置自动下载。程序只会在文件不存在时创建模板，不会覆盖你已经改过的配置或语言文件。
+接下来编辑 `config.toml`，检查线路地址和端口，再重新启动。第二次启动时，缺失的 ip2region 数据库和安全名单会按配置自动下载。程序只会在文件不存在时创建模板，不会覆盖你已经改过的配置或语言文件。
 
 ## ip2region 数据库
 
@@ -63,6 +63,62 @@ Country|Province|City|ISP|iso-alpha2-code
 ```bash
 cargo run --release -- config.toml
 ```
+
+## VPN、Tor 和 Spam IP 拦截
+
+网关可以在登录前拦截 VPN/代理、Tor 出口节点，以及共享 Spam IP 黑名单中的地址。拦截发生在 Transfer Packet 之前；命中后不会把连接继续转发给线路服务器。
+
+默认配置如下：
+
+```toml
+[security]
+enabled = true
+block_vpn = true
+block_tor = true
+block_spam = true
+auto_download = true
+
+tor_exit_list = "./data/tor-exit-list.txt"
+tor_exit_list_url = "https://check.torproject.org/torbulkexitlist"
+
+spam_list = "./data/spam-ip-list.txt"
+spam_list_url = "https://blackip.ustc.edu.cn/list.php?txt"
+
+vpn_ipv4_list = "./data/vpn-ipv4.txt"
+vpn_ipv4_list_url = "https://raw.githubusercontent.com/X4BNet/lists_vpn/main/output/vpn/ipv4.txt"
+vpn_ipv6_list = "./data/vpn-ipv6.txt"
+vpn_ipv6_list_url = "https://raw.githubusercontent.com/X4BNet/lists_vpn/main/output/vpn/ipv6.txt"
+
+allowlist = []
+vpn_isp_contains = []
+```
+
+Tor 名单使用 [Tor Project 提供的 bulk exit list](https://check.torproject.org/torbulkexitlist)；VPN 名单默认使用 [X4BNet 的 IPv4/IPv6 CIDR 列表](https://github.com/X4BNet/lists_vpn)；Spam 名单使用 [USTC 文本列表](https://blackip.ustc.edu.cn/list.php?txt)。名单文件只会在不存在时自动下载，下载内容会先校验再保存；如果下载失败，网关会继续启动并使用本地已有名单。想更新已经存在的名单时，可以先替换对应文件，再重启网关。
+
+`allowlist` 支持单个 IP 或 CIDR，例如：
+
+```toml
+allowlist = [
+    "203.0.113.8",
+    "2001:db8:1234::/48",
+]
+```
+
+名单识别不是绝对准确的：VPN 服务商会更换出口地址，家庭宽带也可能被共享 Spam 名单误收录。`vpn_isp_contains` 只对 ip2region 的 ISP 字段做不区分大小写的包含匹配，建议只填确认过的关键词，例如：
+
+```toml
+vpn_isp_contains = ["某云厂商", "某代理服务"]
+```
+
+如果不希望启用某一项，可以单独关闭：
+
+```toml
+block_vpn = false
+block_tor = false
+block_spam = false
+```
+
+名单命中会同时写入终端和日志文件，并记录命中类型、IP、国家、省份、城市和 ISP。状态查询也会受到拦截影响：被拦截的客户端不会收到服务器列表响应。
 
 客户端使用 Java 版 1.20.5 或更新版本连接网关，例如：
 

@@ -25,6 +25,28 @@ v6_db = "./data/ip2region_v6.xdb"
 auto_download = true
 download_base_url = "https://raw.githubusercontent.com/lionsoul2014/ip2region/v3.17.0/data"
 
+[security]
+# Reject VPN/proxy, Tor exit nodes, and IPs found in the shared Spam list.
+enabled = true
+block_vpn = true
+block_tor = true
+block_spam = true
+# Only missing list files are downloaded; existing files are never overwritten.
+auto_download = true
+tor_exit_list = "./data/tor-exit-list.txt"
+tor_exit_list_url = "https://check.torproject.org/torbulkexitlist"
+spam_list = "./data/spam-ip-list.txt"
+spam_list_url = "https://blackip.ustc.edu.cn/list.php?txt"
+vpn_ipv4_list = "./data/vpn-ipv4.txt"
+vpn_ipv4_list_url = "https://raw.githubusercontent.com/X4BNet/lists_vpn/main/output/vpn/ipv4.txt"
+vpn_ipv6_list = "./data/vpn-ipv6.txt"
+vpn_ipv6_list_url = "https://raw.githubusercontent.com/X4BNet/lists_vpn/main/output/vpn/ipv6.txt"
+# Exact IPs or CIDRs that should never be blocked.
+allowlist = []
+# Optional ISP substring hints. Keep this conservative to avoid blocking normal
+# residential users whose ISP database label contains a hosting keyword.
+vpn_isp_contains = []
+
 [routing]
 default_line = "global"
 

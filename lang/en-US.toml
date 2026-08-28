@@ -10,6 +10,9 @@ version = 1
 "disconnect.no_route" = "No transfer target is configured for your connection."
 "disconnect.invalid_username_length" = "Minecraft username must contain 3 to 16 characters."
 "disconnect.invalid_username_characters" = "Minecraft username contains unsupported characters."
+"disconnect.vpn_blocked" = "VPN or proxy connections are not allowed on this server."
+"disconnect.tor_blocked" = "Tor connections are not allowed on this server."
+"disconnect.spam_blocked" = "This IP is listed in the shared Spam blocklist and cannot connect."
 
 "log.first_run" = "First run: released the default configuration at {config} and language files in {directory}. Edit the files and restart."
 "log.language_created" = "Released language file {path}; edit it and restart the gateway to load changes."
@@ -21,3 +24,7 @@ version = 1
 "log.starting" = "Starting Minecraft Transfer Gateway (locale: {locale})."
 "log.transfer" = "Transferring player {player} to node {line} ({target})."
 "log.status_proxy_failed" = "Backend status query failed; using the gateway's local status instead: {error}"
+"log.security_list_downloaded" = "Downloaded the {kind} blocklist to {path}."
+"log.security_list_download_failed" = "Automatic security blocklist download failed: {error}; continuing with available lists."
+"log.no_security_data" = "No VPN, Tor, or Spam IP blocklist is available; the corresponding blocks are inactive."
+"log.security_blocked" = "Rejected {kind} connection from IP {ip}."

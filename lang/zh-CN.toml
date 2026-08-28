@@ -10,6 +10,9 @@ version = 1
 "disconnect.no_route" = "没有为你的连接配置可用的目标线路。"
 "disconnect.invalid_username_length" = "Minecraft 用户名长度必须为 3 到 16 个字符。"
 "disconnect.invalid_username_characters" = "Minecraft 用户名包含不支持的字符。"
+"disconnect.vpn_blocked" = "检测到 VPN 或代理连接，当前服务器不允许使用此类网络。"
+"disconnect.tor_blocked" = "检测到 Tor 网络连接，当前服务器不允许使用 Tor。"
+"disconnect.spam_blocked" = "当前 IP 命中了共享 Spam 黑名单，暂时无法连接。"
 
 "log.first_run" = "首次运行：已释放默认配置文件 {config} 和语言文件到 {directory}。请编辑配置后重新启动。"
 "log.language_created" = "已释放语言文件 {path}，编辑后重启网关即可加载修改。"
@@ -21,3 +24,7 @@ version = 1
 "log.starting" = "正在启动 Minecraft Transfer 网关（语言：{locale}）。"
 "log.transfer" = "玩家 {player} 将传送到节点 {line}（{target}）。"
 "log.status_proxy_failed" = "子服务器状态查询失败，将使用网关本地状态：{error}"
+"log.security_list_downloaded" = "已下载 {kind} 黑名单到 {path}。"
+"log.security_list_download_failed" = "安全黑名单自动下载失败：{error}；将继续使用已有名单。"
+"log.no_security_data" = "没有可用的 VPN、Tor 或 Spam IP 黑名单；对应拦截功能暂不会生效。"
+"log.security_blocked" = "已拒绝 {kind} 连接（IP：{ip}）。"

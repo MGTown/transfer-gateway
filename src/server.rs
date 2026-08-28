@@ -21,11 +21,13 @@ use crate::{
         encode_login_disconnect, encode_login_success, encode_transfer, parse_handshake,
         parse_login_start, read_packet, write_packet,
     },
+    security::{BlockReason, Security},
 };
 
 pub async fn run(
     config: Arc<AppConfig>,
     ip2region: Arc<Ip2Region>,
+    security: Arc<Security>,
     language: Arc<Language>,
 ) -> Result<()> {
     let listener = TcpListener::bind(&config.server.bind).await?;
@@ -44,12 +46,13 @@ pub async fn run(
 
                 let config = Arc::clone(&config);
                 let ip2region = Arc::clone(&ip2region);
+                let security = Arc::clone(&security);
                 let language = Arc::clone(&language);
                 tokio::spawn(async move {
                     let _permit = permit;
                     let result = timeout(
                         login_timeout,
-                        handle_connection(stream, peer, config, ip2region, language),
+                        handle_connection(stream, peer, config, ip2region, security, language),
                     )
                     .await;
 
@@ -74,6 +77,7 @@ async fn handle_connection(
     peer: SocketAddr,
     config: Arc<AppConfig>,
     ip2region: Arc<Ip2Region>,
+    security: Arc<Security>,
     language: Arc<Language>,
 ) -> Result<()> {
     stream.set_nodelay(true)?;
@@ -84,13 +88,32 @@ async fn handle_connection(
         .await?
         .ok_or_else(|| anyhow!("client closed before handshake"))?;
     let handshake = parse_handshake(&handshake_packet)?;
+    let location = lookup_location(peer, &ip2region, &language);
 
     match handshake.next_state {
         NextState::Status => {
-            handle_status(&mut stream, peer, &config, &ip2region, &language, handshake).await?
+            handle_status(
+                &mut stream,
+                peer,
+                &config,
+                &security,
+                &language,
+                &location,
+                handshake,
+            )
+            .await?
         }
         NextState::Login => {
-            handle_login(&mut stream, peer, &config, &ip2region, &language, handshake).await?
+            handle_login(
+                &mut stream,
+                peer,
+                &config,
+                &security,
+                &language,
+                &location,
+                handshake,
+            )
+            .await?
         }
     }
 
@@ -102,8 +125,9 @@ async fn handle_status(
     stream: &mut BufStream<TcpStream>,
     peer: SocketAddr,
     config: &AppConfig,
-    ip2region: &Ip2Region,
+    security: &Security,
     language: &Language,
+    location: &IpLocation,
     handshake: Handshake,
 ) -> Result<()> {
     let max_frame_length = config.server.max_frame_length;
@@ -117,8 +141,12 @@ async fn handle_status(
         ));
     }
 
-    let location = lookup_location(peer, ip2region, language);
-    let (mut backend, status_payload) = match config.routing.select_route(&location) {
+    if let Some(reason) = security.check(location) {
+        log_security_block(peer, reason, location, language);
+        return Ok(());
+    }
+
+    let (mut backend, status_payload) = match config.routing.select_route(location) {
         Some((line, target)) => {
             let target_address = format_target(target);
             match proxy_status_response(handshake.protocol_version, target, max_frame_length).await
@@ -256,8 +284,9 @@ async fn handle_login(
     stream: &mut BufStream<TcpStream>,
     peer: SocketAddr,
     config: &AppConfig,
-    ip2region: &Ip2Region,
+    security: &Security,
     language: &Language,
+    location: &IpLocation,
     handshake: Handshake,
 ) -> Result<()> {
     let Some(spec) = protocol::protocol_spec(handshake.protocol_version) else {
@@ -307,9 +336,14 @@ async fn handle_login(
         return Ok(());
     }
 
-    let location = lookup_location(peer, ip2region, language);
+    if let Some(reason) = security.check(location) {
+        let disconnect = language.render(reason.disconnect_key(), &[]);
+        log_security_block(peer, reason, location, language);
+        send_login_disconnect(stream, &disconnect).await?;
+        return Ok(());
+    }
 
-    let Some((line, target)) = config.routing.select_route(&location) else {
+    let Some((line, target)) = config.routing.select_route(location) else {
         let reason = language.render("disconnect.no_route", &[]);
         send_login_disconnect(stream, &reason).await?;
         return Ok(());
@@ -362,6 +396,29 @@ async fn handle_login(
         "{transfer_message}"
     );
     Ok(())
+}
+
+fn log_security_block(
+    peer: SocketAddr,
+    reason: BlockReason,
+    location: &IpLocation,
+    language: &Language,
+) {
+    let kind = reason.label();
+    let ip = peer.ip().to_string();
+    let message = language.render(
+        "log.security_blocked",
+        &[("kind", kind), ("ip", ip.as_str())],
+    );
+    warn!(
+        %peer,
+        reason = kind,
+        isp = ?location.isp,
+        country = ?location.country_code,
+        province = ?location.province,
+        city = ?location.city,
+        "{message}"
+    );
 }
 
 async fn send_login_disconnect(stream: &mut BufStream<TcpStream>, reason: &str) -> Result<()> {

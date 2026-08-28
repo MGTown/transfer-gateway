@@ -21,6 +21,8 @@ pub struct AppConfig {
     pub server: ServerConfig,
     #[serde(default)]
     pub ip2region: Ip2RegionConfig,
+    #[serde(default)]
+    pub security: SecurityConfig,
     pub routing: RoutingConfig,
     #[serde(default)]
     pub language: LanguageConfig,
@@ -41,6 +43,7 @@ impl AppConfig {
     fn validate(&self) -> Result<()> {
         self.server.validate()?;
         self.ip2region.validate()?;
+        self.security.validate()?;
         self.routing.validate()?;
         self.language.validate()?;
         Ok(())
@@ -152,6 +155,103 @@ impl Ip2RegionConfig {
             .v6_db
             .take()
             .map(|path| resolve_ip2region_path(config_path, &path));
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SecurityConfig {
+    #[serde(default = "default_security_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_security_block_vpn")]
+    pub block_vpn: bool,
+    #[serde(default = "default_security_block_tor")]
+    pub block_tor: bool,
+    #[serde(default = "default_security_block_spam")]
+    pub block_spam: bool,
+    #[serde(default = "default_security_auto_download")]
+    pub auto_download: bool,
+    #[serde(default = "default_tor_exit_list")]
+    pub tor_exit_list: Option<PathBuf>,
+    #[serde(default = "default_tor_exit_list_url")]
+    pub tor_exit_list_url: String,
+    #[serde(default = "default_spam_list")]
+    pub spam_list: Option<PathBuf>,
+    #[serde(default = "default_spam_list_url")]
+    pub spam_list_url: String,
+    #[serde(default = "default_vpn_ipv4_list")]
+    pub vpn_ipv4_list: Option<PathBuf>,
+    #[serde(default = "default_vpn_ipv4_list_url")]
+    pub vpn_ipv4_list_url: String,
+    #[serde(default = "default_vpn_ipv6_list")]
+    pub vpn_ipv6_list: Option<PathBuf>,
+    #[serde(default = "default_vpn_ipv6_list_url")]
+    pub vpn_ipv6_list_url: String,
+    #[serde(default)]
+    pub allowlist: Vec<String>,
+    #[serde(default)]
+    pub vpn_isp_contains: Vec<String>,
+}
+
+impl Default for SecurityConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_security_enabled(),
+            block_vpn: default_security_block_vpn(),
+            block_tor: default_security_block_tor(),
+            block_spam: default_security_block_spam(),
+            auto_download: default_security_auto_download(),
+            tor_exit_list: default_tor_exit_list(),
+            tor_exit_list_url: default_tor_exit_list_url(),
+            spam_list: default_spam_list(),
+            spam_list_url: default_spam_list_url(),
+            vpn_ipv4_list: default_vpn_ipv4_list(),
+            vpn_ipv4_list_url: default_vpn_ipv4_list_url(),
+            vpn_ipv6_list: default_vpn_ipv6_list(),
+            vpn_ipv6_list_url: default_vpn_ipv6_list_url(),
+            allowlist: Vec::new(),
+            vpn_isp_contains: Vec::new(),
+        }
+    }
+}
+
+impl SecurityConfig {
+    fn validate(&self) -> Result<()> {
+        if self.auto_download && self.enabled {
+            if self.block_tor && configured_path(self.tor_exit_list.as_deref()) {
+                validate_http_url("security.tor_exit_list_url", &self.tor_exit_list_url)?;
+            }
+            if self.block_spam && configured_path(self.spam_list.as_deref()) {
+                validate_http_url("security.spam_list_url", &self.spam_list_url)?;
+            }
+            if self.block_vpn {
+                if configured_path(self.vpn_ipv4_list.as_deref()) {
+                    validate_http_url("security.vpn_ipv4_list_url", &self.vpn_ipv4_list_url)?;
+                }
+                if configured_path(self.vpn_ipv6_list.as_deref()) {
+                    validate_http_url("security.vpn_ipv6_list_url", &self.vpn_ipv6_list_url)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn resolve_paths(&mut self, config_path: &Path) {
+        self.tor_exit_list = self
+            .tor_exit_list
+            .take()
+            .map(|path| resolve_security_path(config_path, &path));
+        self.spam_list = self
+            .spam_list
+            .take()
+            .map(|path| resolve_security_path(config_path, &path));
+        self.vpn_ipv4_list = self
+            .vpn_ipv4_list
+            .take()
+            .map(|path| resolve_security_path(config_path, &path));
+        self.vpn_ipv6_list = self
+            .vpn_ipv6_list
+            .take()
+            .map(|path| resolve_security_path(config_path, &path));
     }
 }
 
@@ -401,6 +501,58 @@ fn default_ip2region_download_base_url() -> String {
     "https://raw.githubusercontent.com/lionsoul2014/ip2region/v3.17.0/data".to_owned()
 }
 
+fn default_security_enabled() -> bool {
+    true
+}
+
+fn default_security_block_vpn() -> bool {
+    true
+}
+
+fn default_security_block_tor() -> bool {
+    true
+}
+
+fn default_security_block_spam() -> bool {
+    true
+}
+
+fn default_security_auto_download() -> bool {
+    true
+}
+
+fn default_tor_exit_list() -> Option<PathBuf> {
+    Some(PathBuf::from("./data/tor-exit-list.txt"))
+}
+
+fn default_tor_exit_list_url() -> String {
+    "https://check.torproject.org/torbulkexitlist".to_owned()
+}
+
+fn default_spam_list() -> Option<PathBuf> {
+    Some(PathBuf::from("./data/spam-ip-list.txt"))
+}
+
+fn default_spam_list_url() -> String {
+    "https://blackip.ustc.edu.cn/list.php?txt".to_owned()
+}
+
+fn default_vpn_ipv4_list() -> Option<PathBuf> {
+    Some(PathBuf::from("./data/vpn-ipv4.txt"))
+}
+
+fn default_vpn_ipv4_list_url() -> String {
+    "https://raw.githubusercontent.com/X4BNet/lists_vpn/main/output/vpn/ipv4.txt".to_owned()
+}
+
+fn default_vpn_ipv6_list() -> Option<PathBuf> {
+    Some(PathBuf::from("./data/vpn-ipv6.txt"))
+}
+
+fn default_vpn_ipv6_list_url() -> String {
+    "https://raw.githubusercontent.com/X4BNet/lists_vpn/main/output/vpn/ipv6.txt".to_owned()
+}
+
 fn default_line() -> String {
     "default".to_owned()
 }
@@ -435,6 +587,23 @@ fn resolve_ip2region_path(config_path: &Path, path: &Path) -> PathBuf {
     } else {
         resolve_relative_path(config_path, path)
     }
+}
+
+fn resolve_security_path(config_path: &Path, path: &Path) -> PathBuf {
+    resolve_ip2region_path(config_path, path)
+}
+
+fn configured_path(path: Option<&Path>) -> bool {
+    path.is_some_and(|path| !path.as_os_str().is_empty())
+}
+
+fn validate_http_url(field: &str, value: &str) -> Result<()> {
+    let url = reqwest::Url::parse(value)
+        .with_context(|| format!("{field} is not a valid URL: {value}"))?;
+    if !matches!(url.scheme(), "http" | "https") {
+        bail!("{field} must use http or https, got {}", url.scheme());
+    }
+    Ok(())
 }
 
 pub fn ensure_config_file(path: &Path) -> Result<bool> {
