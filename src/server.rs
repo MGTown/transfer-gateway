@@ -1,11 +1,18 @@
-use std::{net::SocketAddr, sync::Arc, time::Duration};
+use std::{
+    net::SocketAddr,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
 
 use anyhow::{Result, anyhow};
 use md5::{Digest, Md5};
 use tokio::{
     io::{AsyncWriteExt, BufStream},
     net::{TcpListener, TcpStream},
-    sync::Semaphore,
+    sync::watch,
     time::timeout,
 };
 use tracing::{debug, info, warn};
@@ -21,38 +28,33 @@ use crate::{
         encode_login_disconnect, encode_login_success, encode_transfer, parse_handshake,
         parse_login_start, read_packet, write_packet,
     },
+    runtime::RuntimeState,
     security::{BlockReason, Security},
 };
 
-pub async fn run(
-    config: Arc<AppConfig>,
-    ip2region: Arc<Ip2Region>,
-    security: Arc<Security>,
-    language: Arc<Language>,
-) -> Result<()> {
-    let listener = TcpListener::bind(&config.server.bind).await?;
-    let connections = Arc::new(Semaphore::new(config.server.max_connections));
-    let login_timeout = Duration::from_millis(config.server.login_timeout_ms);
+pub async fn run(mut state_receiver: watch::Receiver<Arc<RuntimeState>>) -> Result<()> {
+    let initial = state_receiver.borrow().clone();
+    let mut listener = TcpListener::bind(&initial.config.server.bind).await?;
+    let mut bound = initial.config.server.bind.clone();
+    let connections = ConnectionLimiter::default();
 
     loop {
         tokio::select! {
             accepted = listener.accept() => {
                 let (stream, peer) = accepted?;
-                let Some(permit) = connections.clone().try_acquire_owned().ok() else {
-                    let message = language.render("log.connection_limit", &[]);
+                let state = state_receiver.borrow().clone();
+                let Some(permit) = connections.try_acquire(state.config.server.max_connections) else {
+                    let message = state.language.render("log.connection_limit", &[]);
                     warn!(%peer, "{message}");
                     continue;
                 };
 
-                let config = Arc::clone(&config);
-                let ip2region = Arc::clone(&ip2region);
-                let security = Arc::clone(&security);
-                let language = Arc::clone(&language);
+                let login_timeout = Duration::from_millis(state.config.server.login_timeout_ms);
                 tokio::spawn(async move {
                     let _permit = permit;
                     let result = timeout(
                         login_timeout,
-                        handle_connection(stream, peer, config, ip2region, security, language),
+                        handle_connection(stream, peer, state),
                     )
                     .await;
 
@@ -63,6 +65,26 @@ pub async fn run(
                     }
                 });
             }
+            changed = state_receiver.changed() => {
+                changed?;
+                let state = state_receiver.borrow().clone();
+                if state.config.server.bind != bound {
+                    match TcpListener::bind(&state.config.server.bind).await {
+                        Ok(new_listener) => {
+                            info!(bind = %state.config.server.bind, "server listener rebound after configuration reload");
+                            listener = new_listener;
+                            bound = state.config.server.bind.clone();
+                        }
+                        Err(error) => {
+                            warn!(
+                                bind = %state.config.server.bind,
+                                ?error,
+                                "unable to rebind server listener; keeping the previous listener"
+                            );
+                        }
+                    }
+                }
+            }
             signal = tokio::signal::ctrl_c() => {
                 signal?;
                 info!("shutdown signal received");
@@ -72,32 +94,68 @@ pub async fn run(
     }
 }
 
+#[derive(Clone, Default)]
+struct ConnectionLimiter {
+    active: Arc<AtomicUsize>,
+}
+
+impl ConnectionLimiter {
+    fn try_acquire(&self, maximum: usize) -> Option<ConnectionPermit> {
+        let mut active = self.active.load(Ordering::Acquire);
+        loop {
+            if active >= maximum {
+                return None;
+            }
+            match self.active.compare_exchange_weak(
+                active,
+                active + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    return Some(ConnectionPermit {
+                        active: Arc::clone(&self.active),
+                    });
+                }
+                Err(current) => active = current,
+            }
+        }
+    }
+}
+
+struct ConnectionPermit {
+    active: Arc<AtomicUsize>,
+}
+
+impl Drop for ConnectionPermit {
+    fn drop(&mut self) {
+        self.active.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
 async fn handle_connection(
     stream: TcpStream,
     peer: SocketAddr,
-    config: Arc<AppConfig>,
-    ip2region: Arc<Ip2Region>,
-    security: Arc<Security>,
-    language: Arc<Language>,
+    state: Arc<RuntimeState>,
 ) -> Result<()> {
     stream.set_nodelay(true)?;
     let mut stream = BufStream::new(stream);
-    let max_frame_length = config.server.max_frame_length;
+    let max_frame_length = state.config.server.max_frame_length;
 
     let handshake_packet = read_packet(&mut stream, max_frame_length)
         .await?
         .ok_or_else(|| anyhow!("client closed before handshake"))?;
     let handshake = parse_handshake(&handshake_packet)?;
-    let location = lookup_location(peer, &ip2region, &language);
+    let location = lookup_location(peer, &state.ip2region, &state.language);
 
     match handshake.next_state {
         NextState::Status => {
             handle_status(
                 &mut stream,
                 peer,
-                &config,
-                &security,
-                &language,
+                &state.config,
+                &state.security,
+                &state.language,
                 &location,
                 handshake,
             )
@@ -107,9 +165,9 @@ async fn handle_connection(
             handle_login(
                 &mut stream,
                 peer,
-                &config,
-                &security,
-                &language,
+                &state.config,
+                &state.security,
+                &state.language,
                 &location,
                 handshake,
             )
@@ -146,39 +204,45 @@ async fn handle_status(
         return Ok(());
     }
 
-    let (mut backend, status_payload) = match config.routing.select_route(location) {
-        Some((line, target)) => {
-            let target_address = format_target(target);
-            match proxy_status_response(handshake.protocol_version, target, max_frame_length).await
-            {
-                Ok((backend, payload)) => {
-                    debug!(
-                        %peer,
-                        node = line,
-                        target = %target_address,
-                        "proxied backend server status"
-                    );
-                    (Some(backend), payload)
-                }
-                Err(error) => {
-                    let error_display = error.to_string();
-                    let message = language.render(
-                        "log.status_proxy_failed",
-                        &[("error", error_display.as_str())],
-                    );
-                    warn!(
-                        %peer,
-                        node = line,
-                        target = %target_address,
-                        ?error,
-                        "{message}"
-                    );
-                    (None, local_status_payload(config, language)?)
+    let balance_key = peer.ip().to_string();
+    let (mut backend, status_payload) =
+        match config
+            .routing
+            .select_route_with_context(location, None, security, &balance_key)
+        {
+            Some((line, target)) => {
+                let target_address = format_target(&target);
+                match proxy_status_response(handshake.protocol_version, &target, max_frame_length)
+                    .await
+                {
+                    Ok((backend, payload)) => {
+                        debug!(
+                            %peer,
+                            node = %line,
+                            target = %target_address,
+                            "proxied backend server status"
+                        );
+                        (Some(backend), payload)
+                    }
+                    Err(error) => {
+                        let error_display = error.to_string();
+                        let message = language.render(
+                            "log.status_proxy_failed",
+                            &[("error", error_display.as_str())],
+                        );
+                        warn!(
+                            %peer,
+                            node = %line,
+                            target = %target_address,
+                            ?error,
+                            "{message}"
+                        );
+                        (None, local_status_payload(config, language)?)
+                    }
                 }
             }
-        }
-        None => (None, local_status_payload(config, language)?),
-    };
+            None => (None, local_status_payload(config, language)?),
+        };
     write_packet(stream, 0, &status_payload).await?;
 
     let ping = read_packet(stream, max_frame_length)
@@ -343,13 +407,18 @@ async fn handle_login(
         return Ok(());
     }
 
-    let Some((line, target)) = config.routing.select_route(location) else {
+    let balance_key = peer.ip().to_string();
+    let Some((line, target)) = config.routing.select_route_with_context(
+        location,
+        Some(&login_start.username),
+        security,
+        &balance_key,
+    ) else {
         let reason = language.render("disconnect.no_route", &[]);
         send_login_disconnect(stream, &reason).await?;
         return Ok(());
     };
 
-    let target = target.clone();
     let target_address = format_target(&target);
 
     let profile_uuid = offline_uuid(&login_start.username);
@@ -379,7 +448,7 @@ async fn handle_login(
         "log.transfer",
         &[
             ("player", login_start.username.as_str()),
-            ("line", line),
+            ("line", line.as_str()),
             ("target", target_address.as_str()),
         ],
     );
@@ -387,7 +456,7 @@ async fn handle_login(
         %peer,
         player = %login_start.username,
         protocol = handshake.protocol_version,
-        node = line,
+        node = %line,
         target = %target_address,
         country = ?location.country_code,
         province = ?location.province,

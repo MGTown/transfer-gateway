@@ -1,8 +1,13 @@
 use std::{
     collections::BTreeMap,
     fs::{self, OpenOptions},
+    hash::{Hash, Hasher},
     io::{ErrorKind, Write},
     path::{Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 
 use anyhow::{Context, Result, bail};
@@ -12,6 +17,7 @@ use crate::{
     ip2region::IpLocation,
     language::{DEFAULT_LANGUAGE_DIRECTORY, DEFAULT_LOCALE},
     protocol,
+    security::Security,
 };
 
 pub const DEFAULT_CONFIG_TEMPLATE: &str = include_str!("../config.example.toml");
@@ -38,6 +44,11 @@ impl AppConfig {
             .with_context(|| format!("invalid TOML in {}", path.display()))?;
         config.validate()?;
         Ok(config)
+    }
+
+    pub fn resolve_paths(&mut self, config_path: &Path) {
+        self.ip2region.resolve_paths(config_path);
+        self.security.resolve_paths(config_path);
     }
 
     fn validate(&self) -> Result<()> {
@@ -112,6 +123,16 @@ pub struct Ip2RegionConfig {
     pub v6_db: Option<PathBuf>,
     #[serde(default = "default_ip2region_auto_download")]
     pub auto_download: bool,
+    #[serde(default = "default_ip2region_auto_update")]
+    pub auto_update: bool,
+    #[serde(
+        default = "default_ip2region_update_interval_secs",
+        alias = "update_delay_secs",
+        alias = "update_delay",
+        alias = "delay_secs",
+        alias = "delay"
+    )]
+    pub update_interval_secs: u64,
     #[serde(default = "default_ip2region_download_base_url")]
     pub download_base_url: String,
 }
@@ -122,6 +143,8 @@ impl Default for Ip2RegionConfig {
             v4_db: default_ip2region_v4_db(),
             v6_db: default_ip2region_v6_db(),
             auto_download: default_ip2region_auto_download(),
+            auto_update: default_ip2region_auto_update(),
+            update_interval_secs: default_ip2region_update_interval_secs(),
             download_base_url: default_ip2region_download_base_url(),
         }
     }
@@ -129,7 +152,7 @@ impl Default for Ip2RegionConfig {
 
 impl Ip2RegionConfig {
     fn validate(&self) -> Result<()> {
-        if self.auto_download {
+        if self.auto_download || self.auto_update {
             let url = reqwest::Url::parse(&self.download_base_url).with_context(|| {
                 format!(
                     "ip2region.download_base_url is not a valid URL: {}",
@@ -142,6 +165,9 @@ impl Ip2RegionConfig {
                     url.scheme()
                 );
             }
+        }
+        if self.auto_update && self.update_interval_secs == 0 {
+            bail!("ip2region.update_interval_secs must be greater than zero");
         }
         Ok(())
     }
@@ -170,6 +196,16 @@ pub struct SecurityConfig {
     pub block_spam: bool,
     #[serde(default = "default_security_auto_download")]
     pub auto_download: bool,
+    #[serde(default = "default_security_auto_update")]
+    pub auto_update: bool,
+    #[serde(
+        default = "default_security_update_interval_secs",
+        alias = "update_delay_secs",
+        alias = "update_delay",
+        alias = "delay_secs",
+        alias = "delay"
+    )]
+    pub update_interval_secs: u64,
     #[serde(default = "default_tor_exit_list")]
     pub tor_exit_list: Option<PathBuf>,
     #[serde(default = "default_tor_exit_list_url")]
@@ -200,6 +236,8 @@ impl Default for SecurityConfig {
             block_tor: default_security_block_tor(),
             block_spam: default_security_block_spam(),
             auto_download: default_security_auto_download(),
+            auto_update: default_security_auto_update(),
+            update_interval_secs: default_security_update_interval_secs(),
             tor_exit_list: default_tor_exit_list(),
             tor_exit_list_url: default_tor_exit_list_url(),
             spam_list: default_spam_list(),
@@ -216,21 +254,22 @@ impl Default for SecurityConfig {
 
 impl SecurityConfig {
     fn validate(&self) -> Result<()> {
-        if self.auto_download && self.enabled {
-            if self.block_tor && configured_path(self.tor_exit_list.as_deref()) {
+        if (self.auto_download || self.auto_update) && self.enabled {
+            if configured_path(self.tor_exit_list.as_deref()) {
                 validate_http_url("security.tor_exit_list_url", &self.tor_exit_list_url)?;
             }
-            if self.block_spam && configured_path(self.spam_list.as_deref()) {
+            if configured_path(self.spam_list.as_deref()) {
                 validate_http_url("security.spam_list_url", &self.spam_list_url)?;
             }
-            if self.block_vpn {
-                if configured_path(self.vpn_ipv4_list.as_deref()) {
-                    validate_http_url("security.vpn_ipv4_list_url", &self.vpn_ipv4_list_url)?;
-                }
-                if configured_path(self.vpn_ipv6_list.as_deref()) {
-                    validate_http_url("security.vpn_ipv6_list_url", &self.vpn_ipv6_list_url)?;
-                }
+            if configured_path(self.vpn_ipv4_list.as_deref()) {
+                validate_http_url("security.vpn_ipv4_list_url", &self.vpn_ipv4_list_url)?;
             }
+            if configured_path(self.vpn_ipv6_list.as_deref()) {
+                validate_http_url("security.vpn_ipv6_list_url", &self.vpn_ipv6_list_url)?;
+            }
+        }
+        if self.auto_update && self.update_interval_secs == 0 {
+            bail!("security.update_interval_secs must be greater than zero");
         }
         Ok(())
     }
@@ -324,28 +363,65 @@ pub struct RoutingConfig {
     pub lines: BTreeMap<String, LineTarget>,
     #[serde(default)]
     pub rules: Vec<RouteRule>,
+    #[serde(default, alias = "groups")]
+    pub group: Vec<RoutingGroup>,
 }
 
 impl RoutingConfig {
     fn validate(&self) -> Result<()> {
-        if self.lines.is_empty() {
-            bail!("routing.lines must contain at least one target");
+        if self.lines.is_empty() && self.group.is_empty() {
+            bail!("routing.lines or routing.group must contain at least one target");
         }
-        if !self.lines.contains_key(&self.default_line) {
+        if !self.default_line.is_empty() && !self.has_target(&self.default_line) {
             bail!(
-                "routing.default_line '{}' is not present in routing.lines",
+                "routing.default_line '{}' is not present in routing.lines or routing.group",
                 self.default_line
             );
+        }
+        if self.default_line.is_empty() && self.rules.is_empty() {
+            bail!("routing.default_line must not be empty when routing.rules is empty");
         }
 
         for (name, target) in &self.lines {
             target.validate(name)?;
         }
-        for (index, rule) in self.rules.iter().enumerate() {
-            if !self.lines.contains_key(&rule.line) {
+        for (index, group) in self.group.iter().enumerate() {
+            group.validate(index)?;
+            if self.lines.contains_key(&group.group_name)
+                || self.group.iter().enumerate().any(|(other_index, other)| {
+                    other_index < index && other.group_name == group.group_name
+                })
+            {
                 bail!(
-                    "routing.rules[{index}].line '{}' is not present in routing.lines",
+                    "routing.group[{index}].group_name '{}' is duplicated",
+                    group.group_name
+                );
+            }
+        }
+        for (index, rule) in self.rules.iter().enumerate() {
+            let has_line = !rule.line.trim().is_empty();
+            let has_group = rule
+                .group
+                .as_deref()
+                .is_some_and(|group| !group.trim().is_empty());
+            if has_line == has_group {
+                bail!("routing.rules[{index}] must define exactly one of line or group");
+            }
+            if has_line && !self.has_target(&rule.line) {
+                bail!(
+                    "routing.rules[{index}].line '{}' is not present in routing.lines or routing.group",
                     rule.line
+                );
+            }
+            if has_group
+                && !self
+                    .group
+                    .iter()
+                    .any(|group| Some(group.group_name.as_str()) == rule.group.as_deref())
+            {
+                bail!(
+                    "routing.rules[{index}].group '{}' is not present in routing.group",
+                    rule.group.as_deref().unwrap_or_default()
                 );
             }
         }
@@ -353,28 +429,79 @@ impl RoutingConfig {
     }
 
     pub fn select_route<'a>(&'a self, location: &IpLocation) -> Option<(&'a str, &'a LineTarget)> {
-        let mut selected: Option<(i32, usize, &str)> = None;
-
-        for (index, rule) in self.rules.iter().enumerate() {
-            if !rule.matches(location) {
-                continue;
-            }
-
-            let should_replace = selected
-                .as_ref()
-                .map(|(priority, _, _)| rule.priority > *priority)
-                .unwrap_or(true);
-            if should_replace {
-                selected = Some((rule.priority, index, rule.line.as_str()));
-            }
-        }
-
-        let line_name = selected
-            .map(|(_, _, line)| line)
+        let line_name = self
+            .select_matching_rule(location, None, None)
+            .and_then(|rule| rule.line_target_name(self))
             .unwrap_or(self.default_line.as_str());
         self.lines
             .get_key_value(line_name)
             .map(|(name, target)| (name.as_str(), target))
+    }
+
+    pub fn select_route_with_context(
+        &self,
+        location: &IpLocation,
+        player: Option<&str>,
+        security: &Security,
+        balance_key: &str,
+    ) -> Option<(String, LineTarget)> {
+        if let Some(rule) = self.select_matching_rule(location, player, Some(security)) {
+            if let Some(line_name) = rule.line_target_name(self)
+                && let Some(target) = self.lines.get(line_name)
+            {
+                return Some((line_name.to_owned(), target.clone()));
+            }
+            if let Some(group_name) = rule.group_target_name()
+                && let Some(group) = self
+                    .group
+                    .iter()
+                    .find(|group| group.group_name == group_name)
+            {
+                return Some((group_name.to_owned(), group.select_target(balance_key)));
+            }
+        }
+
+        self.select_target(&self.default_line, balance_key)
+    }
+
+    fn select_matching_rule<'a>(
+        &'a self,
+        location: &IpLocation,
+        player: Option<&str>,
+        security: Option<&Security>,
+    ) -> Option<&'a RouteRule> {
+        let mut selected: Option<(i32, usize, &RouteRule)> = None;
+
+        for (index, rule) in self.rules.iter().enumerate() {
+            if !rule.matches(location, player, security) {
+                continue;
+            }
+
+            let priority = rule.effective_priority(self);
+            let should_replace = selected
+                .as_ref()
+                .map(|(selected_priority, _, _)| priority > *selected_priority)
+                .unwrap_or(true);
+            if should_replace {
+                selected = Some((priority, index, rule));
+            }
+        }
+
+        selected.map(|(_, _, rule)| rule)
+    }
+
+    fn has_target(&self, name: &str) -> bool {
+        self.lines.contains_key(name) || self.group.iter().any(|group| group.group_name == name)
+    }
+
+    fn select_target(&self, name: &str, balance_key: &str) -> Option<(String, LineTarget)> {
+        if let Some(target) = self.lines.get(name) {
+            return Some((name.to_owned(), target.clone()));
+        }
+        self.group
+            .iter()
+            .find(|group| group.group_name == name)
+            .map(|group| (name.to_owned(), group.select_target(balance_key)))
     }
 }
 
@@ -399,54 +526,278 @@ impl LineTarget {
     }
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct RoutingGroup {
+    #[serde(default)]
+    pub priority: i32,
+    pub group_name: String,
+    #[serde(default = "default_group_mode")]
+    pub mode: String,
+    #[serde(default = "default_group_port")]
+    pub port: u16,
+    pub hosts: Vec<String>,
+    #[serde(skip, default = "default_group_counter")]
+    counter: Arc<AtomicUsize>,
+}
+
+impl RoutingGroup {
+    fn validate(&self, index: usize) -> Result<()> {
+        if self.group_name.trim().is_empty() {
+            bail!("routing.group[{index}].group_name must not be empty");
+        }
+        if self.hosts.is_empty() {
+            bail!("routing.group[{index}].hosts must contain at least one host");
+        }
+        if self.port == 0 {
+            bail!("routing.group[{index}].port must be greater than zero");
+        }
+        if parse_group_mode(&self.mode).is_none() {
+            bail!(
+                "routing.group[{index}].mode '{}' is unsupported; use round_robin, random or ip_hash",
+                self.mode
+            );
+        }
+        for (host_index, host) in self.hosts.iter().enumerate() {
+            if host.trim().is_empty() {
+                bail!("routing.group[{index}].hosts[{host_index}] must not be empty");
+            }
+            if host.len() > 255 {
+                bail!("routing.group[{index}].hosts[{host_index}] must be at most 255 bytes");
+            }
+        }
+        Ok(())
+    }
+
+    fn select_target(&self, balance_key: &str) -> LineTarget {
+        let index = match parse_group_mode(&self.mode).unwrap_or(GroupMode::RoundRobin) {
+            GroupMode::RoundRobin => {
+                self.counter.fetch_add(1, Ordering::Relaxed) % self.hosts.len()
+            }
+            GroupMode::Random => {
+                let sequence = self.counter.fetch_add(1, Ordering::Relaxed);
+                pseudo_random_index(sequence, self.hosts.len())
+            }
+            GroupMode::IpHash => {
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                balance_key.hash(&mut hasher);
+                (hasher.finish() as usize) % self.hosts.len()
+            }
+        };
+        LineTarget {
+            host: self.hosts[index].clone(),
+            port: self.port,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct RouteRule {
     #[serde(default)]
     pub priority: i32,
+    #[serde(default)]
     pub line: String,
+    #[serde(default, alias = "group_name")]
+    pub group: Option<String>,
     #[serde(default)]
     pub countries: Vec<String>,
     #[serde(default, alias = "subdivisions")]
     pub provinces: Vec<String>,
+    #[serde(default, alias = "not_subdivisions")]
+    pub not_provinces: Vec<String>,
     #[serde(default)]
     pub cities: Vec<String>,
+    #[serde(default)]
+    pub not_countries: Vec<String>,
+    #[serde(default)]
+    pub not_cities: Vec<String>,
     #[serde(default, alias = "operator_contains")]
     pub isp_contains: Vec<String>,
+    #[serde(default, alias = "not_operator_contains")]
+    pub not_isp_contains: Vec<String>,
+    #[serde(default)]
+    pub players: Vec<String>,
+    #[serde(default)]
+    pub not_players: Vec<String>,
+    #[serde(default)]
+    pub vpn: Option<bool>,
+    #[serde(default)]
+    pub not_vpn: bool,
+    #[serde(default)]
+    pub spam: Option<bool>,
+    #[serde(default)]
+    pub not_spam: bool,
+    #[serde(default)]
+    pub tor: Option<bool>,
+    #[serde(default)]
+    pub not_tor: bool,
 }
 
 impl RouteRule {
-    fn matches(&self, location: &IpLocation) -> bool {
-        matches_text_list(&self.countries, location.country_code.as_deref())
-            && matches_text_list(&self.provinces, location.province.as_deref())
-            && matches_text_list(&self.cities, location.city.as_deref())
-            && self.matches_operator(location)
+    fn matches(
+        &self,
+        location: &IpLocation,
+        player: Option<&str>,
+        security: Option<&Security>,
+    ) -> bool {
+        matches_text_list(
+            &self.countries,
+            &self.not_countries,
+            location.country_code.as_deref(),
+        ) && matches_text_list(
+            &self.provinces,
+            &self.not_provinces,
+            location.province.as_deref(),
+        ) && matches_text_list(&self.cities, &self.not_cities, location.city.as_deref())
+            && matches_contains_list(
+                &self.isp_contains,
+                &self.not_isp_contains,
+                location.isp.as_deref(),
+            )
+            && self.matches_player(player)
+            && self.matches_security(location, security)
     }
 
-    fn matches_operator(&self, location: &IpLocation) -> bool {
-        if self.isp_contains.is_empty() {
+    fn matches_player(&self, player: Option<&str>) -> bool {
+        if self.players.is_empty() && self.not_players.is_empty() {
             return true;
         }
+        let Some(player) = player else { return false };
+        matches_text_list(&self.players, &self.not_players, Some(player))
+    }
 
-        self.isp_contains.iter().any(|needle| {
-            let needle = needle.to_lowercase();
-            location
-                .isp
-                .as_deref()
-                .map(|isp| isp.to_lowercase().contains(needle.as_str()))
-                .unwrap_or(false)
-        })
+    fn matches_security(&self, location: &IpLocation, security: Option<&Security>) -> bool {
+        if self.vpn.is_none()
+            && !self.not_vpn
+            && self.spam.is_none()
+            && !self.not_spam
+            && self.tor.is_none()
+            && !self.not_tor
+        {
+            return true;
+        }
+        let Some(security) = security else {
+            return false;
+        };
+        matches_bool(self.vpn, self.not_vpn, security.matches_vpn(location))
+            && matches_bool(self.spam, self.not_spam, security.matches_spam(location))
+            && matches_bool(self.tor, self.not_tor, security.matches_tor(location))
+    }
+
+    fn line_target_name<'a>(&'a self, routing: &'a RoutingConfig) -> Option<&'a str> {
+        (!self.line.trim().is_empty() && routing.lines.contains_key(&self.line))
+            .then_some(self.line.as_str())
+    }
+
+    fn group_target_name(&self) -> Option<&str> {
+        self.group
+            .as_deref()
+            .filter(|group| !group.trim().is_empty())
+            .or_else(|| (!self.line.trim().is_empty()).then_some(self.line.as_str()))
+    }
+
+    fn effective_priority(&self, routing: &RoutingConfig) -> i32 {
+        if self.priority != 0 {
+            return self.priority;
+        }
+        self.group_target_name()
+            .and_then(|target| {
+                routing
+                    .group
+                    .iter()
+                    .find(|group| group.group_name == target)
+                    .map(|group| group.priority)
+            })
+            .unwrap_or(self.priority)
     }
 }
 
-fn matches_text_list(values: &[String], actual: Option<&str>) -> bool {
-    values.is_empty()
-        || actual
-            .map(|actual| {
-                values
-                    .iter()
-                    .any(|expected| expected.eq_ignore_ascii_case(actual))
+fn matches_text_list(positive: &[String], negative: &[String], actual: Option<&str>) -> bool {
+    let has_positive = positive
+        .iter()
+        .any(|expected| bang_negation(expected).is_none());
+    let positive_matches = !has_positive
+        || actual.is_some_and(|actual| {
+            positive.iter().any(|expected| {
+                bang_negation(expected).is_none() && expected.eq_ignore_ascii_case(actual)
             })
-            .unwrap_or(false)
+        });
+    let negative_matches = actual.is_some_and(|actual| {
+        negative
+            .iter()
+            .any(|expected| matcher_value(expected).eq_ignore_ascii_case(actual))
+            || positive
+                .iter()
+                .filter_map(|expected| bang_negation(expected))
+                .any(|expected| expected.eq_ignore_ascii_case(actual))
+    });
+    positive_matches && !negative_matches
+}
+
+fn matches_contains_list(positive: &[String], negative: &[String], actual: Option<&str>) -> bool {
+    let actual_lower = actual.map(str::to_lowercase);
+    let has_positive = positive
+        .iter()
+        .any(|expected| bang_negation(expected).is_none());
+    let positive_matches = !has_positive
+        || actual_lower.as_deref().is_some_and(|actual| {
+            positive.iter().any(|expected| {
+                bang_negation(expected).is_none()
+                    && actual.contains(expected.to_lowercase().as_str())
+            })
+        });
+    let negative_matches = actual_lower.as_deref().is_some_and(|actual| {
+        negative
+            .iter()
+            .any(|expected| actual.contains(matcher_value(expected).to_lowercase().as_str()))
+            || positive
+                .iter()
+                .filter_map(|expected| bang_negation(expected))
+                .any(|expected| actual.contains(expected.to_lowercase().as_str()))
+    });
+    positive_matches && !negative_matches
+}
+
+fn bang_negation(value: &str) -> Option<&str> {
+    value.strip_prefix('!').filter(|value| !value.is_empty())
+}
+
+fn matcher_value(value: &str) -> &str {
+    bang_negation(value).unwrap_or(value)
+}
+
+fn matches_bool(expected: Option<bool>, negated: bool, actual: bool) -> bool {
+    expected.is_none_or(|expected| expected == actual) && (!negated || !actual)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GroupMode {
+    RoundRobin,
+    Random,
+    IpHash,
+}
+
+fn parse_group_mode(mode: &str) -> Option<GroupMode> {
+    let normalized: String = mode
+        .chars()
+        .filter(|character| !character.is_whitespace() && *character != '_' && *character != '-')
+        .flat_map(char::to_lowercase)
+        .collect();
+    match normalized.as_str() {
+        "roundrobin" | "loadbalance" | "loadblance" => Some(GroupMode::RoundRobin),
+        "random" => Some(GroupMode::Random),
+        "iphash" | "hash" | "consistenthash" => Some(GroupMode::IpHash),
+        _ => None,
+    }
+}
+
+fn pseudo_random_index(sequence: usize, length: usize) -> usize {
+    let mut value = (sequence as u64)
+        .wrapping_mul(6_364_136_223_846_793_005)
+        .wrapping_add(1_442_695_040_888_963_407);
+    value ^= value >> 33;
+    value = value.wrapping_mul(1_099_511_628_211u64);
+    value ^= value >> 29;
+    (value as usize) % length
 }
 
 fn default_bind() -> String {
@@ -497,8 +848,16 @@ fn default_ip2region_auto_download() -> bool {
     true
 }
 
+fn default_ip2region_auto_update() -> bool {
+    false
+}
+
+fn default_ip2region_update_interval_secs() -> u64 {
+    24 * 60 * 60
+}
+
 fn default_ip2region_download_base_url() -> String {
-    "https://raw.githubusercontent.com/lionsoul2014/ip2region/v3.17.0/data".to_owned()
+    "https://raw.githubusercontent.com/lionsoul2014/ip2region/master/data".to_owned()
 }
 
 fn default_security_enabled() -> bool {
@@ -519,6 +878,14 @@ fn default_security_block_spam() -> bool {
 
 fn default_security_auto_download() -> bool {
     true
+}
+
+fn default_security_auto_update() -> bool {
+    false
+}
+
+fn default_security_update_interval_secs() -> u64 {
+    24 * 60 * 60
 }
 
 fn default_tor_exit_list() -> Option<PathBuf> {
@@ -555,6 +922,18 @@ fn default_vpn_ipv6_list_url() -> String {
 
 fn default_line() -> String {
     "default".to_owned()
+}
+
+fn default_group_mode() -> String {
+    "round_robin".to_owned()
+}
+
+fn default_group_port() -> u16 {
+    25565
+}
+
+fn default_group_counter() -> Arc<AtomicUsize> {
+    Arc::new(AtomicUsize::new(0))
 }
 
 fn default_locale() -> String {
@@ -641,4 +1020,253 @@ pub fn config_directory(path: &Path) -> &Path {
     path.parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{ip2region::IpLocation, security::Security};
+    use std::net::{IpAddr, Ipv4Addr};
+
+    fn location(country: &str, isp: &str) -> IpLocation {
+        IpLocation {
+            ip: IpAddr::V4(Ipv4Addr::new(203, 0, 113, 8)),
+            country_code: Some(country.to_owned()),
+            country_name: None,
+            province: None,
+            city: None,
+            isp: Some(isp.to_owned()),
+        }
+    }
+
+    fn security() -> Security {
+        Security::open(&SecurityConfig {
+            enabled: false,
+            vpn_isp_contains: vec!["cloud".to_owned()],
+            ..SecurityConfig::default()
+        })
+        .expect("test security configuration should load")
+    }
+
+    #[test]
+    fn route_matches_player_and_isp_as_and_conditions() {
+        let routing: RoutingConfig = toml::from_str(
+            r#"
+            default_line = "global"
+
+            [lines.global]
+            host = "global.example.com"
+            port = 25565
+
+            [lines.mobile]
+            host = "mobile.example.com"
+            port = 25565
+
+            [[rules]]
+            priority = 10
+            line = "mobile"
+            countries = ["JP"]
+            isp_contains = ["mobile"]
+            players = ["herobrine", "dinnerbone"]
+            "#,
+        )
+        .expect("test routing configuration should parse");
+        routing
+            .validate()
+            .expect("test routing configuration should validate");
+        let security = security();
+
+        let route = routing
+            .select_route_with_context(
+                &location("JP", "Example Mobile"),
+                Some("Herobrine"),
+                &security,
+                "203.0.113.8",
+            )
+            .expect("matching route should exist");
+        assert_eq!(route.0, "mobile");
+
+        let fallback = routing
+            .select_route_with_context(
+                &location("JP", "Example Mobile"),
+                Some("Alex"),
+                &security,
+                "203.0.113.8",
+            )
+            .expect("default route should exist");
+        assert_eq!(fallback.0, "global");
+    }
+
+    #[test]
+    fn route_supports_negative_and_security_conditions() {
+        let routing: RoutingConfig = toml::from_str(
+            r#"
+            default_line = "global"
+
+            [lines.global]
+            host = "global.example.com"
+            port = 25565
+
+            [lines.special]
+            host = "special.example.com"
+            port = 25565
+
+            [[rules]]
+            priority = 20
+            line = "special"
+            not_countries = ["CN"]
+            not_players = ["blocked"]
+            vpn = true
+            "#,
+        )
+        .expect("test routing configuration should parse");
+        routing
+            .validate()
+            .expect("test routing configuration should validate");
+        let security = security();
+
+        let route = routing
+            .select_route_with_context(
+                &location("JP", "Cloud Transit"),
+                Some("allowed"),
+                &security,
+                "203.0.113.8",
+            )
+            .expect("matching route should exist");
+        assert_eq!(route.0, "special");
+
+        let fallback = routing
+            .select_route_with_context(
+                &location("CN", "Cloud Transit"),
+                Some("allowed"),
+                &security,
+                "203.0.113.8",
+            )
+            .expect("default route should exist");
+        assert_eq!(fallback.0, "global");
+    }
+
+    #[test]
+    fn group_selects_hosts_in_round_robin_order() {
+        let routing: RoutingConfig = toml::from_str(
+            r#"
+            default_line = "global"
+
+            [lines.global]
+            host = "global.example.com"
+            port = 25565
+
+            [[group]]
+            priority = 10
+            group_name = "cmcc-cluster"
+            mode = "round_robin"
+            hosts = ["cmcc-01.example.com", "cmcc-02.example.com"]
+
+            [[rules]]
+            group = "cmcc-cluster"
+            countries = ["CN"]
+            "#,
+        )
+        .expect("test routing configuration should parse");
+        routing
+            .validate()
+            .expect("test routing configuration should validate");
+        let security = security();
+
+        let first = routing
+            .select_route_with_context(
+                &location("CN", "China Mobile"),
+                None,
+                &security,
+                "203.0.113.8",
+            )
+            .expect("group route should exist");
+        let second = routing
+            .select_route_with_context(
+                &location("CN", "China Mobile"),
+                None,
+                &security,
+                "203.0.113.8",
+            )
+            .expect("group route should exist");
+        assert_eq!(first.0, "cmcc-cluster");
+        assert_eq!(first.1.host, "cmcc-01.example.com");
+        assert_eq!(second.1.host, "cmcc-02.example.com");
+    }
+
+    #[test]
+    fn default_config_template_is_valid() {
+        let config: AppConfig =
+            toml::from_str(DEFAULT_CONFIG_TEMPLATE).expect("default template should parse");
+        config.validate().expect("default template should validate");
+    }
+
+    #[test]
+    fn route_supports_bang_negation_in_matcher_values() {
+        let routing: RoutingConfig = toml::from_str(
+            r#"
+            default_line = "global"
+
+            [lines.global]
+            host = "global.example.com"
+            port = 25565
+
+            [lines.special]
+            host = "special.example.com"
+            port = 25565
+
+            [[rules]]
+            priority = 20
+            line = "special"
+            countries = ["JP", "!CN"]
+            isp_contains = ["mobile", "!cloud"]
+            players = ["!blocked"]
+            "#,
+        )
+        .expect("test routing configuration should parse");
+        routing
+            .validate()
+            .expect("test routing configuration should validate");
+        let security = security();
+
+        let match_route = routing
+            .select_route_with_context(
+                &location("JP", "Example Mobile"),
+                Some("allowed"),
+                &security,
+                "203.0.113.8",
+            )
+            .expect("bang matcher should match");
+        assert_eq!(match_route.0, "special");
+
+        let excluded_country = routing
+            .select_route_with_context(
+                &location("CN", "Example Mobile"),
+                Some("allowed"),
+                &security,
+                "203.0.113.8",
+            )
+            .expect("default route should exist");
+        assert_eq!(excluded_country.0, "global");
+
+        let excluded_isp = routing
+            .select_route_with_context(
+                &location("JP", "Cloud Transit"),
+                Some("allowed"),
+                &security,
+                "203.0.113.8",
+            )
+            .expect("default route should exist");
+        assert_eq!(excluded_isp.0, "global");
+
+        let excluded_player = routing
+            .select_route_with_context(
+                &location("JP", "Example Mobile"),
+                Some("blocked"),
+                &security,
+                "203.0.113.8",
+            )
+            .expect("default route should exist");
+        assert_eq!(excluded_player.0, "global");
+    }
 }

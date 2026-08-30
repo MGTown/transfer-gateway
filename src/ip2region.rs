@@ -9,7 +9,10 @@ use std::{
 use anyhow::{Context, Result, anyhow, bail};
 use ip2region::{CachePolicy, Searcher};
 use reqwest::Client;
-use tokio::{fs as tokio_fs, io::AsyncWriteExt};
+use tokio::{
+    fs as tokio_fs,
+    io::{AsyncReadExt, AsyncWriteExt},
+};
 use uuid::Uuid;
 
 use crate::config::Ip2RegionConfig;
@@ -49,6 +52,18 @@ pub struct Ip2Region {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DownloadedDatabase {
+    pub version: &'static str,
+    pub path: PathBuf,
+}
+
+#[derive(Debug, Default)]
+pub struct UpdateReport {
+    pub updated: Vec<UpdatedDatabase>,
+    pub errors: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdatedDatabase {
     pub version: &'static str,
     pub path: PathBuf,
 }
@@ -133,6 +148,51 @@ pub async fn download_missing(config: &Ip2RegionConfig) -> Result<Vec<Downloaded
     Ok(downloaded)
 }
 
+pub async fn update(config: &Ip2RegionConfig) -> Result<UpdateReport> {
+    let mut report = UpdateReport::default();
+    if !config.auto_update {
+        return Ok(report);
+    }
+
+    let paths = [
+        (config.v4_db.as_deref(), IPV4_DATABASE_NAME, "IPv4"),
+        (config.v6_db.as_deref(), IPV6_DATABASE_NAME, "IPv6"),
+    ];
+    if !paths
+        .iter()
+        .any(|(path, _, _)| configured_path(*path).is_some())
+    {
+        return Ok(report);
+    }
+
+    let client = Client::builder()
+        .user_agent(format!(
+            "{}/{}",
+            env!("CARGO_PKG_NAME"),
+            env!("CARGO_PKG_VERSION")
+        ))
+        .connect_timeout(Duration::from_secs(15))
+        .timeout(DOWNLOAD_TIMEOUT)
+        .build()
+        .context("unable to create HTTP client for ip2region update")?;
+
+    for (path, filename, version) in paths {
+        let Some(path) = configured_path(path) else {
+            continue;
+        };
+        match update_one(&client, &config.download_base_url, path, filename, version).await {
+            Ok(true) => report.updated.push(UpdatedDatabase {
+                version,
+                path: path.to_owned(),
+            }),
+            Ok(false) => {}
+            Err(error) => report.errors.push(format!("{version}: {error}")),
+        }
+    }
+
+    Ok(report)
+}
+
 fn configured_path(path: Option<&Path>) -> Option<&Path> {
     path.filter(|path| !path.as_os_str().is_empty())
 }
@@ -174,6 +234,50 @@ async fn download_one(
         let _ = tokio_fs::remove_file(&temporary_path).await;
     }
     result
+}
+
+async fn update_one(
+    client: &Client,
+    base_url: &str,
+    path: &Path,
+    filename: &str,
+    version: &str,
+) -> Result<bool> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        tokio_fs::create_dir_all(parent).await.with_context(|| {
+            format!("unable to create ip2region directory {}", parent.display())
+        })?;
+    }
+
+    let temporary_path = temporary_path(path);
+    if let Err(error) =
+        download_to_temp(client, &download_url(base_url, filename), &temporary_path).await
+    {
+        let _ = tokio_fs::remove_file(&temporary_path).await;
+        return Err(error);
+    }
+
+    if let Err(error) = validate_downloaded_xdb(&temporary_path, version) {
+        let _ = tokio_fs::remove_file(&temporary_path).await;
+        return Err(error);
+    }
+
+    if path.exists() && files_equal(&temporary_path, path).await? {
+        tokio_fs::remove_file(&temporary_path)
+            .await
+            .with_context(|| {
+                format!(
+                    "unable to remove unchanged temporary ip2region database {}",
+                    temporary_path.display()
+                )
+            })?;
+        return Ok(false);
+    }
+
+    replace_download(&temporary_path, path).await?;
+    Ok(true)
 }
 
 async fn download_to_temp(client: &Client, url: &str, path: &Path) -> Result<()> {
@@ -324,6 +428,44 @@ async fn publish_download(temporary_path: &Path, destination: &Path) -> Result<b
             )
         })?;
     Ok(true)
+}
+
+async fn replace_download(temporary_path: &Path, destination: &Path) -> Result<()> {
+    tokio_fs::rename(temporary_path, destination)
+        .await
+        .with_context(|| {
+            format!(
+                "unable to atomically replace ip2region database {}",
+                destination.display()
+            )
+        })
+}
+
+async fn files_equal(first: &Path, second: &Path) -> Result<bool> {
+    let first_metadata = tokio_fs::metadata(first).await?;
+    let second_metadata = tokio_fs::metadata(second).await?;
+    if first_metadata.len() != second_metadata.len() {
+        return Ok(false);
+    }
+
+    let mut first = tokio_fs::File::open(first).await?;
+    let mut second = tokio_fs::File::open(second).await?;
+    let mut first_buffer = [0_u8; 64 * 1024];
+    let mut second_buffer = [0_u8; 64 * 1024];
+
+    loop {
+        let first_read = first.read(&mut first_buffer).await?;
+        let second_read = second.read(&mut second_buffer).await?;
+        if first_read != second_read {
+            return Ok(false);
+        }
+        if first_read == 0 {
+            return Ok(true);
+        }
+        if first_buffer[..first_read] != second_buffer[..second_read] {
+            return Ok(false);
+        }
+    }
 }
 
 fn download_url(base_url: &str, filename: &str) -> String {

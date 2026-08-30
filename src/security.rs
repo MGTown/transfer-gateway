@@ -8,7 +8,10 @@ use std::{
 
 use anyhow::{Context, Result, anyhow, bail};
 use reqwest::Client;
-use tokio::{fs as tokio_fs, io::AsyncWriteExt};
+use tokio::{
+    fs as tokio_fs,
+    io::{AsyncReadExt, AsyncWriteExt},
+};
 use uuid::Uuid;
 
 use crate::{config::SecurityConfig, ip2region::IpLocation};
@@ -59,6 +62,18 @@ pub struct DownloadedList {
     pub path: PathBuf,
 }
 
+#[derive(Debug, Default)]
+pub struct UpdateReport {
+    pub updated: Vec<UpdatedList>,
+    pub errors: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdatedList {
+    pub kind: &'static str,
+    pub path: PathBuf,
+}
+
 impl Security {
     pub fn open(config: &SecurityConfig) -> Result<Self> {
         let allowlist = IpSet::from_networks(
@@ -73,24 +88,12 @@ impl Security {
                 })
                 .collect::<Result<Vec<_>>>()?,
         );
-        let vpn = if config.enabled && config.block_vpn {
-            load_network_files([
-                (config.vpn_ipv4_list.as_deref(), "VPN IPv4"),
-                (config.vpn_ipv6_list.as_deref(), "VPN IPv6"),
-            ])?
-        } else {
-            IpSet::default()
-        };
-        let tor = if config.enabled && config.block_tor {
-            load_ip_file(config.tor_exit_list.as_deref(), "Tor exit")?
-        } else {
-            IpSet::default()
-        };
-        let spam = if config.enabled && config.block_spam {
-            load_ip_file(config.spam_list.as_deref(), "Spam IP")?
-        } else {
-            IpSet::default()
-        };
+        let vpn = load_network_files([
+            (config.vpn_ipv4_list.as_deref(), "VPN IPv4"),
+            (config.vpn_ipv6_list.as_deref(), "VPN IPv6"),
+        ])?;
+        let tor = load_ip_file(config.tor_exit_list.as_deref(), "Tor exit")?;
+        let spam = load_ip_file(config.spam_list.as_deref(), "Spam IP")?;
         let vpn_isp_contains = config
             .vpn_isp_contains
             .iter()
@@ -127,21 +130,32 @@ impl Security {
     }
 
     pub fn check(&self, location: &IpLocation) -> Option<BlockReason> {
-        if !self.is_enabled() || self.allowlist.contains(location.ip) {
+        if !self.is_enabled() {
             return None;
         }
-        if self.block_tor && self.tor.contains(location.ip) {
+        if self.block_tor && self.matches_tor(location) {
             return Some(BlockReason::Tor);
         }
-        if self.block_vpn
-            && (self.vpn.contains(location.ip) || self.matches_vpn_isp(location.isp.as_deref()))
-        {
+        if self.block_vpn && self.matches_vpn(location) {
             return Some(BlockReason::Vpn);
         }
-        if self.block_spam && self.spam.contains(location.ip) {
+        if self.block_spam && self.matches_spam(location) {
             return Some(BlockReason::Spam);
         }
         None
+    }
+
+    pub fn matches_vpn(&self, location: &IpLocation) -> bool {
+        !self.allowlist.contains(location.ip)
+            && (self.vpn.contains(location.ip) || self.matches_vpn_isp(location.isp.as_deref()))
+    }
+
+    pub fn matches_tor(&self, location: &IpLocation) -> bool {
+        !self.allowlist.contains(location.ip) && self.tor.contains(location.ip)
+    }
+
+    pub fn matches_spam(&self, location: &IpLocation) -> bool {
+        !self.allowlist.contains(location.ip) && self.spam.contains(location.ip)
     }
 
     fn matches_vpn_isp(&self, isp: Option<&str>) -> bool {
@@ -161,8 +175,7 @@ pub async fn download_missing(config: &SecurityConfig) -> Result<Vec<DownloadedL
     }
 
     let mut pending = Vec::new();
-    if config.block_tor
-        && let Some(path) = configured_path(config.tor_exit_list.as_deref())
+    if let Some(path) = configured_path(config.tor_exit_list.as_deref())
         && !path.exists()
     {
         pending.push(DownloadItem {
@@ -172,8 +185,7 @@ pub async fn download_missing(config: &SecurityConfig) -> Result<Vec<DownloadedL
             url: config.tor_exit_list_url.clone(),
         });
     }
-    if config.block_spam
-        && let Some(path) = configured_path(config.spam_list.as_deref())
+    if let Some(path) = configured_path(config.spam_list.as_deref())
         && !path.exists()
     {
         pending.push(DownloadItem {
@@ -183,27 +195,25 @@ pub async fn download_missing(config: &SecurityConfig) -> Result<Vec<DownloadedL
             url: config.spam_list_url.clone(),
         });
     }
-    if config.block_vpn {
-        if let Some(path) = configured_path(config.vpn_ipv4_list.as_deref())
-            && !path.exists()
-        {
-            pending.push(DownloadItem {
-                kind: "VPN IPv4",
-                format: ListFormat::Network,
-                path: path.to_owned(),
-                url: config.vpn_ipv4_list_url.clone(),
-            });
-        }
-        if let Some(path) = configured_path(config.vpn_ipv6_list.as_deref())
-            && !path.exists()
-        {
-            pending.push(DownloadItem {
-                kind: "VPN IPv6",
-                format: ListFormat::Network,
-                path: path.to_owned(),
-                url: config.vpn_ipv6_list_url.clone(),
-            });
-        }
+    if let Some(path) = configured_path(config.vpn_ipv4_list.as_deref())
+        && !path.exists()
+    {
+        pending.push(DownloadItem {
+            kind: "VPN IPv4",
+            format: ListFormat::Network,
+            path: path.to_owned(),
+            url: config.vpn_ipv4_list_url.clone(),
+        });
+    }
+    if let Some(path) = configured_path(config.vpn_ipv6_list.as_deref())
+        && !path.exists()
+    {
+        pending.push(DownloadItem {
+            kind: "VPN IPv6",
+            format: ListFormat::Network,
+            path: path.to_owned(),
+            url: config.vpn_ipv6_list_url.clone(),
+        });
     }
 
     if pending.is_empty() {
@@ -242,6 +252,74 @@ pub async fn download_missing(config: &SecurityConfig) -> Result<Vec<DownloadedL
             errors.join("; ")
         ))
     }
+}
+
+pub async fn update(config: &SecurityConfig) -> Result<UpdateReport> {
+    let mut report = UpdateReport::default();
+    if !config.enabled || !config.auto_update {
+        return Ok(report);
+    }
+
+    let mut pending = Vec::new();
+    if let Some(path) = configured_path(config.tor_exit_list.as_deref()) {
+        pending.push(DownloadItem {
+            kind: "Tor exit",
+            format: ListFormat::Ip,
+            path: path.to_owned(),
+            url: config.tor_exit_list_url.clone(),
+        });
+    }
+    if let Some(path) = configured_path(config.spam_list.as_deref()) {
+        pending.push(DownloadItem {
+            kind: "Spam IP",
+            format: ListFormat::Network,
+            path: path.to_owned(),
+            url: config.spam_list_url.clone(),
+        });
+    }
+    if let Some(path) = configured_path(config.vpn_ipv4_list.as_deref()) {
+        pending.push(DownloadItem {
+            kind: "VPN IPv4",
+            format: ListFormat::Network,
+            path: path.to_owned(),
+            url: config.vpn_ipv4_list_url.clone(),
+        });
+    }
+    if let Some(path) = configured_path(config.vpn_ipv6_list.as_deref()) {
+        pending.push(DownloadItem {
+            kind: "VPN IPv6",
+            format: ListFormat::Network,
+            path: path.to_owned(),
+            url: config.vpn_ipv6_list_url.clone(),
+        });
+    }
+    if pending.is_empty() {
+        return Ok(report);
+    }
+
+    let client = Client::builder()
+        .user_agent(format!(
+            "{}/{}",
+            env!("CARGO_PKG_NAME"),
+            env!("CARGO_PKG_VERSION")
+        ))
+        .connect_timeout(Duration::from_secs(15))
+        .timeout(DOWNLOAD_TIMEOUT)
+        .build()
+        .context("unable to create HTTP client for security list update")?;
+
+    for item in pending {
+        match update_one(&client, &item).await {
+            Ok(true) => report.updated.push(UpdatedList {
+                kind: item.kind,
+                path: item.path,
+            }),
+            Ok(false) => {}
+            Err(error) => report.errors.push(format!("{}: {error}", item.kind)),
+        }
+    }
+
+    Ok(report)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -288,6 +366,44 @@ async fn download_one(client: &Client, item: &DownloadItem) -> Result<bool> {
         let _ = tokio_fs::remove_file(&temporary_path).await;
     }
     result
+}
+
+async fn update_one(client: &Client, item: &DownloadItem) -> Result<bool> {
+    if let Some(parent) = item.path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        tokio_fs::create_dir_all(parent).await.with_context(|| {
+            format!(
+                "unable to create security list directory {}",
+                parent.display()
+            )
+        })?;
+    }
+
+    let temporary_path = temporary_path(&item.path);
+    if let Err(error) = download_to_temp(client, &item.url, &temporary_path).await {
+        let _ = tokio_fs::remove_file(&temporary_path).await;
+        return Err(error);
+    }
+    if let Err(error) = validate_list_file(&temporary_path, item.kind, item.format) {
+        let _ = tokio_fs::remove_file(&temporary_path).await;
+        return Err(error);
+    }
+
+    if item.path.exists() && files_equal(&temporary_path, &item.path).await? {
+        tokio_fs::remove_file(&temporary_path)
+            .await
+            .with_context(|| {
+                format!(
+                    "unable to remove unchanged temporary security list {}",
+                    temporary_path.display()
+                )
+            })?;
+        return Ok(false);
+    }
+
+    replace_download(&temporary_path, &item.path).await?;
+    Ok(true)
 }
 
 async fn download_to_temp(client: &Client, url: &str, path: &Path) -> Result<()> {
@@ -418,6 +534,44 @@ async fn publish_download(temporary_path: &Path, destination: &Path) -> Result<b
         });
     }
     Ok(true)
+}
+
+async fn replace_download(temporary_path: &Path, destination: &Path) -> Result<()> {
+    tokio_fs::rename(temporary_path, destination)
+        .await
+        .with_context(|| {
+            format!(
+                "unable to atomically replace security list {}",
+                destination.display()
+            )
+        })
+}
+
+async fn files_equal(first: &Path, second: &Path) -> Result<bool> {
+    let first_metadata = tokio_fs::metadata(first).await?;
+    let second_metadata = tokio_fs::metadata(second).await?;
+    if first_metadata.len() != second_metadata.len() {
+        return Ok(false);
+    }
+
+    let mut first = tokio_fs::File::open(first).await?;
+    let mut second = tokio_fs::File::open(second).await?;
+    let mut first_buffer = [0_u8; 64 * 1024];
+    let mut second_buffer = [0_u8; 64 * 1024];
+
+    loop {
+        let first_read = first.read(&mut first_buffer).await?;
+        let second_read = second.read(&mut second_buffer).await?;
+        if first_read != second_read {
+            return Ok(false);
+        }
+        if first_read == 0 {
+            return Ok(true);
+        }
+        if first_buffer[..first_read] != second_buffer[..second_read] {
+            return Ok(false);
+        }
+    }
 }
 
 fn load_network_files<'a, I>(files: I) -> Result<IpSet>

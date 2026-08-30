@@ -7,6 +7,7 @@ edition = "2024"
 anyhow = "1"
 ip2region = { git = "https://github.com/lionsoul2014/ip2region.git", rev = "800d19424237f4be5f2081e6cd9547d98f3871c3", package = "ip2region" }
 md-5 = "0.10"
+notify = "8.2"
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

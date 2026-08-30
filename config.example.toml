@@ -23,7 +23,10 @@ file = "./logs/gateway.log"
 v4_db = "./data/ip2region_v4.xdb"
 v6_db = "./data/ip2region_v6.xdb"
 auto_download = true
-download_base_url = "https://raw.githubusercontent.com/lionsoul2014/ip2region/v3.17.0/data"
+# Periodically check and hot-apply newer databases from this directory.
+auto_update = true
+update_interval_secs = 86400
+download_base_url = "https://raw.githubusercontent.com/lionsoul2014/ip2region/master/data"
 
 [security]
 # Reject VPN/proxy, Tor exit nodes, and IPs found in the shared Spam list.
@@ -31,8 +34,11 @@ enabled = true
 block_vpn = true
 block_tor = true
 block_spam = true
-# Only missing list files are downloaded; existing files are never overwritten.
+# auto_download only fills missing list files; auto_update periodically replaces changed lists.
 auto_download = true
+# Periodically check and hot-apply changed lists.
+auto_update = true
+update_interval_secs = 86400
 tor_exit_list = "./data/tor-exit-list.txt"
 tor_exit_list_url = "https://check.torproject.org/torbulkexitlist"
 spam_list = "./data/spam-ip-list.txt"
@@ -72,3 +78,18 @@ priority = 100
 line = "cn-telecom"
 countries = ["CN"]
 isp_contains = ["China Telecom", "中国电信"]
+
+# [[routing.group]]
+# priority = 10
+# group_name = "cmcc-cluster"
+# mode = "round_robin"
+# port = 25565
+# hosts = ["cmcc-node-01.mgtown.cn", "cmcc-node-02.mgtown.cn"]
+#
+# [[routing.rules]]
+# priority = 10
+# group = "cmcc-cluster"
+# players = ["herobrine", "dinnerbone"]
+#
+# countries = ["!CN"]
+# players = ["!blocked-player"]

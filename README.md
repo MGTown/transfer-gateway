@@ -34,7 +34,13 @@ lang/zh-CN.toml
 lang/en-US.toml
 ```
 
-接下来编辑 `config.toml`，检查线路地址和端口，再重新启动。第二次启动时，缺失的 ip2region 数据库和安全名单会按配置自动下载。程序只会在文件不存在时创建模板，不会覆盖你已经改过的配置或语言文件。
+接下来编辑 `config.toml`，检查线路地址和端口，再启动网关。第二次启动时，缺失的 ip2region 数据库和安全名单会按配置自动下载。程序只会在文件不存在时创建模板，不会覆盖你已经改过的配置或语言文件。
+
+## 配置热加载
+
+网关启动后会监听配置文件所在目录。直接修改或原子替换 `config.toml` 后，网关会等待文件写入完成，重新解析并校验配置，然后一次性应用新的运行时状态。路由、MOTD、协议限制、安全名单、语言、日志文件、连接上限和登录超时都可以在运行中生效；修改 `server.bind` 时会重新绑定监听端口。
+
+如果 TOML、线路地址、名单或其他依赖校验失败，网关会记录错误并继续使用上一份有效配置，不会因为一次保存失败而停止服务。正在处理的连接保留建立连接时的配置，新连接使用最新配置。
 
 ## ip2region 数据库
 
@@ -45,10 +51,14 @@ lang/en-US.toml
 v4_db = "./data/ip2region_v4.xdb"
 v6_db = "./data/ip2region_v6.xdb"
 auto_download = true
-download_base_url = "https://raw.githubusercontent.com/lionsoul2014/ip2region/v3.17.0/data"
+auto_update = true
+update_interval_secs = 86400
+download_base_url = "https://raw.githubusercontent.com/lionsoul2014/ip2region/master/data"
 ```
 
-默认配置会在启动时自动下载缺失的数据库，放到 `v4_db` 和 `v6_db` 指定的位置；已有文件不会被覆盖。只需要 IPv4 时，可以把 `v6_db` 设为空字符串。若使用内网镜像，把 `download_base_url` 改成镜像中同时存放两个 xdb 文件的目录；设置 `auto_download = false` 后则完全使用本地文件。下载失败时网关会记录错误并继续启动，缺少数据库的地址类型会使用默认线路。
+`auto_download` 只负责在启动或配置重载时补齐不存在的数据库；`auto_update` 开启后，网关会每隔 `update_interval_secs` 秒从 `download_base_url` 检查并下载两个 `.xdb` 文件。`auto_update` 默认关闭，示例配置显式开启。新文件会先校验 IP 版本，再与现有文件比较，最后原子替换并热应用；下载、校验或重建失败时继续使用当前数据库。`update_delay_secs`、`update_delay`、`delay_secs` 和 `delay` 也可作为 `update_interval_secs` 的兼容字段名，单位均为秒。默认示例使用 ip2region 官方 `master/data` 目录，该目录包含 IPv4 和 IPv6 的 xdb 文件；如果希望固定某个版本，可以把地址改成相应 release 的 `data` 目录并将 `auto_update` 设为 `false`。
+
+只需要 IPv4 时，可以把 `v6_db` 设为空字符串。若使用内网镜像，把 `download_base_url` 改成镜像中同时存放两个 xdb 文件的目录。下载失败时网关会记录错误并继续启动，缺少数据库的地址类型会使用默认线路。
 
 ip2region 的标准区域数据格式是：
 
@@ -56,7 +66,7 @@ ip2region 的标准区域数据格式是：
 Country|Province|City|ISP|iso-alpha2-code
 ```
 
-网关使用其中的国家代码、省份、城市和 ISP 字段进行匹配，其中 ISP 是运营商分流的主要依据。ip2region 的标准数据不包含 ASN，因此本项目不再读取 GeoLite/GeoIP 数据库，也不支持按 ASN 数字匹配；运营商线路请使用 `isp_contains` 匹配 ISP 文本。数据库的更新和自定义数据制作请参考 [ip2region 官方仓库](https://github.com/lionsoul2014/ip2region)。自动下载使用的是官方 `v3.17.0` 数据目录；升级数据版本时，请同时修改 `download_base_url` 并确认绑定版本兼容。
+网关使用其中的国家代码、省份、城市和 ISP 字段进行匹配，其中 ISP 是运营商分流的主要依据。ip2region 的标准数据不包含 ASN，因此本项目不再读取 GeoLite/GeoIP 数据库，也不支持按 ASN 数字匹配；运营商线路请使用 `isp_contains` 匹配 ISP 文本。数据库的更新和自定义数据制作请参考 [ip2region 官方仓库](https://github.com/lionsoul2014/ip2region)。如果固定使用 release 数据目录，升级数据版本时请同时修改 `download_base_url` 并确认绑定版本兼容。
 
 启动：
 
@@ -77,6 +87,8 @@ block_vpn = true
 block_tor = true
 block_spam = true
 auto_download = true
+auto_update = true
+update_interval_secs = 86400
 
 tor_exit_list = "./data/tor-exit-list.txt"
 tor_exit_list_url = "https://check.torproject.org/torbulkexitlist"
@@ -93,7 +105,7 @@ allowlist = []
 vpn_isp_contains = []
 ```
 
-Tor 名单使用 [Tor Project 提供的 bulk exit list](https://check.torproject.org/torbulkexitlist)；VPN 名单默认使用 [X4BNet 的 IPv4/IPv6 CIDR 列表](https://github.com/X4BNet/lists_vpn)；Spam 名单使用 [USTC 文本列表](https://blackip.ustc.edu.cn/list.php?txt)。名单文件只会在不存在时自动下载，下载内容会先校验再保存；如果下载失败，网关会继续启动并使用本地已有名单。想更新已经存在的名单时，可以先替换对应文件，再重启网关。
+Tor 名单使用 [Tor Project 提供的 bulk exit list](https://check.torproject.org/torbulkexitlist)；VPN 名单默认使用 [X4BNet 的 IPv4/IPv6 CIDR 列表](https://github.com/X4BNet/lists_vpn)；Spam 名单使用 [USTC 文本列表](https://blackip.ustc.edu.cn/list.php?txt)。名单文件即使对应的 `block_*` 关闭，也会被加载供路由规则中的 `vpn`、`spam`、`tor` 使用；`block_*` 只控制连接拦截。`auto_download` 只在名单不存在时下载，`auto_update` 开启后会按 `update_interval_secs` 秒周期性检查并热应用变化；下载内容会先校验再保存，失败时网关继续使用本地已有名单。`auto_update` 默认关闭，示例配置显式开启；这些间隔字段同样支持 `update_delay_secs`、`update_delay`、`delay_secs` 和 `delay` 别名。也可以在配置文件中直接替换名单，保存配置后触发重载。
 
 `allowlist` 支持单个 IP 或 CIDR，例如：
 
@@ -229,7 +241,7 @@ host = "telecom.example.com"
 port = 25565
 ```
 
-规则按 `priority` 从高到低选择；优先级相同的时候，配置文件中靠前的规则优先。一个规则里的多个字段是 AND 关系，同一字段数组里的多个值是 OR 关系。
+规则按 `priority` 从高到低选择；优先级相同的时候，配置文件中靠前的规则优先。一个规则里的多个字段是 AND 关系，同一字段数组里的多个值是 OR 关系。状态查询没有玩家名，因此包含 `players` 或 `not_players` 的规则只在玩家登录时参与匹配。
 
 支持的匹配条件：
 
@@ -237,6 +249,9 @@ port = 25565
 - `provinces`：ip2region 返回的省或州名称，例如 `广东省`、`Tokyo`。为兼容旧配置，`subdivisions` 也可以作为字段名使用。
 - `cities`：城市名称，例如 `深圳市`、`Tokyo`。
 - `isp_contains`：对 ISP 文本做不区分大小写的包含匹配；例如 `电信`、`联通`、`移动`。旧配置中的 `operator_contains` 仍可识别。
+- `players`：玩家名，不区分大小写精确匹配，例如 `herobrine`、`dinnerbone`。
+- `not_countries`、`not_provinces`、`not_cities`、`not_isp_contains`、`not_players`：对应条件的排除列表；也支持 `not_subdivisions` 和 `not_operator_contains` 兼容别名。为了简化配置，`countries`、`provinces`、`cities`、`isp_contains`、`players` 中的单个值也可以用 `!` 开头表示“不等于/不包含”，例如 `countries = ["!CN"]`、`players = ["!herobrine"]`；同一个数组可以混合正向值和 `!` 排除值。
+- `vpn`、`spam`、`tor`：布尔条件，按已加载的安全名单匹配；例如 `vpn = true` 只匹配 VPN，`spam = false` 排除 Spam IP。`not_vpn`、`not_spam`、`not_tor` 可表达否定判断，名单的 `allowlist` 优先级最高。
 
 例如，下面的规则会把中国电信用户送到 `cn-telecom`：
 
@@ -247,6 +262,41 @@ line = "cn-telecom"
 countries = ["CN"]
 isp_contains = ["China Telecom", "中国电信", "电信"]
 ```
+
+多个因素可以放在同一个规则中，以下规则只匹配日本且 ISP 包含移动关键词的两个玩家：
+
+```toml
+[[routing.rules]]
+priority = 120
+line = "mobile"
+countries = ["JP"]
+isp_contains = ["mobile", "移动"]
+players = ["herobrine", "dinnerbone"]
+```
+
+### 线路组和负载均衡
+
+`routing.group` 用于把多个目标放进同一个线路池。组的 `port` 默认是 `25565`，`hosts` 中的重复项会保留，因此可以用重复次数实现简单权重。规则通过 `group` 引用组，也可以把组名写在旧的 `line` 字段中：
+
+```toml
+[[routing.group]]
+priority = 10
+group_name = "cmcc-cluster"
+mode = "round_robin"
+port = 25565
+hosts = [
+    "cmcc-node-01.mgtown.cn",
+    "cmcc-node-02.mgtown.cn",
+    "cmcc-node-01.mgtown.cn",
+]
+
+[[routing.rules]]
+priority = 10
+group = "cmcc-cluster"
+isp_contains = ["移动", "CMCC"]
+```
+
+支持的 `mode` 有 `round_robin`、`random` 和 `ip_hash`；`loadblance`（示例中的拼写）和 `loadbalance` 也会按轮询处理。`ip_hash` 按来源 IP 选择固定节点，`round_robin` 和 `random` 使用组内的原子计数器。组的 `priority` 会在关联规则没有显式优先级（为 `0`）时作为该规则的优先级；一般建议直接在规则上写 `priority`。
 
 不同数据版本或自定义数据库里的 ISP 命名可能不同，实际匹配值以日志输出为准。
 
