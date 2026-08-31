@@ -15,6 +15,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::{
     config::AppConfig,
+    dns::MinecraftDnsResolver,
     ip2region::{self, Ip2Region},
     language::{self, Language},
     logging::LogController,
@@ -27,6 +28,7 @@ const DISABLED_UPDATE_RETRY: Duration = Duration::from_secs(60 * 60);
 #[derive(Clone)]
 pub struct RuntimeState {
     pub config: Arc<AppConfig>,
+    pub dns: Arc<MinecraftDnsResolver>,
     pub ip2region: Arc<Ip2Region>,
     pub security: Arc<Security>,
     pub language: Arc<Language>,
@@ -117,9 +119,11 @@ impl RuntimeState {
             enabled = security.is_enabled(),
             "security blocklists loaded"
         );
+        let dns = Arc::new(MinecraftDnsResolver::from_system_config());
 
         Ok(Self {
             config: Arc::new(config),
+            dns,
             ip2region,
             security,
             language,
@@ -129,6 +133,7 @@ impl RuntimeState {
     fn with_ip2region(&self, ip2region: Ip2Region) -> Self {
         Self {
             config: Arc::clone(&self.config),
+            dns: Arc::clone(&self.dns),
             ip2region: Arc::new(ip2region),
             security: Arc::clone(&self.security),
             language: Arc::clone(&self.language),
@@ -138,6 +143,7 @@ impl RuntimeState {
     fn with_security(&self, security: Security) -> Self {
         Self {
             config: Arc::clone(&self.config),
+            dns: Arc::clone(&self.dns),
             ip2region: Arc::clone(&self.ip2region),
             security: Arc::new(security),
             language: Arc::clone(&self.language),

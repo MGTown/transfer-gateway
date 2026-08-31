@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1"
+hickory-resolver = { version = "0.26.1", default-features = false, features = ["system-config", "tokio"] }
 ip2region = { git = "https://github.com/lionsoul2014/ip2region.git", rev = "800d19424237f4be5f2081e6cd9547d98f3871c3", package = "ip2region" }
 md-5 = "0.10"
 notify = "8.2"

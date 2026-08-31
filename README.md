@@ -231,6 +231,7 @@ default_line = "global"
 [routing.lines.global]
 host = "global.example.com"
 port = 25565
+resolve_srv = false
 
 [routing.lines.cn]
 host = "cn.example.com"
@@ -240,6 +241,31 @@ port = 25565
 host = "telecom.example.com"
 port = 25565
 ```
+
+每个子线路都可以单独设置 `resolve_srv`，默认值是 `false`。设置为 `true` 后，
+网关会为该目标查询 Minecraft 标准的 `_minecraft._tcp.<host>` SRV 记录。记录
+存在时，网关会按最低 `priority` 和 `weight` 选择目标，并将解析出的主机和端口
+用于状态透传以及 Transfer Packet；没有 SRV 记录时继续使用配置中的
+`host:port`。如果线路只配置 `host`，缺失的 `port` 默认是 `25565`。`minecraft_srv`
+和 `srv` 也可以作为 `resolve_srv` 的兼容字段名使用。线路组也有自己的
+`resolve_srv`，并会将该设置应用于组内选出的节点。
+
+例如，DNS 中存在以下记录时：
+
+```text
+_minecraft._tcp.play.example.com.  IN  SRV  0 10 25570 node.example.net.
+```
+
+线路可以只写：
+
+```toml
+[routing.lines.global]
+host = "play.example.com"
+resolve_srv = true
+```
+
+SRV 目标为 `.` 时表示服务明确不可用，该线路的登录会被拒绝，状态查询会回退
+到网关本地状态。
 
 规则按 `priority` 从高到低选择；优先级相同的时候，配置文件中靠前的规则优先。一个规则里的多个字段是 AND 关系，同一字段数组里的多个值是 OR 关系。状态查询没有玩家名，因此包含 `players` 或 `not_players` 的规则只在玩家登录时参与匹配。
 
@@ -284,6 +310,7 @@ priority = 10
 group_name = "cmcc-cluster"
 mode = "round_robin"
 port = 25565
+resolve_srv = false
 hosts = [
     "cmcc-node-01.mgtown.cn",
     "cmcc-node-02.mgtown.cn",

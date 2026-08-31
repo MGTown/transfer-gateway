@@ -508,7 +508,14 @@ impl RoutingConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct LineTarget {
     pub host: String,
+    #[serde(default = "default_line_port")]
     pub port: u16,
+    #[serde(
+        default = "default_resolve_srv",
+        alias = "minecraft_srv",
+        alias = "srv"
+    )]
+    pub resolve_srv: bool,
 }
 
 impl LineTarget {
@@ -535,6 +542,12 @@ pub struct RoutingGroup {
     pub mode: String,
     #[serde(default = "default_group_port")]
     pub port: u16,
+    #[serde(
+        default = "default_resolve_srv",
+        alias = "minecraft_srv",
+        alias = "srv"
+    )]
+    pub resolve_srv: bool,
     pub hosts: Vec<String>,
     #[serde(skip, default = "default_group_counter")]
     counter: Arc<AtomicUsize>,
@@ -586,6 +599,7 @@ impl RoutingGroup {
         LineTarget {
             host: self.hosts[index].clone(),
             port: self.port,
+            resolve_srv: self.resolve_srv,
         }
     }
 }
@@ -932,6 +946,14 @@ fn default_group_port() -> u16 {
     25565
 }
 
+fn default_line_port() -> u16 {
+    25565
+}
+
+fn default_resolve_srv() -> bool {
+    false
+}
+
 fn default_group_counter() -> Arc<AtomicUsize> {
     Arc::new(AtomicUsize::new(0))
 }
@@ -1160,6 +1182,7 @@ mod tests {
             priority = 10
             group_name = "cmcc-cluster"
             mode = "round_robin"
+            resolve_srv = true
             hosts = ["cmcc-01.example.com", "cmcc-02.example.com"]
 
             [[rules]]
@@ -1191,7 +1214,60 @@ mod tests {
             .expect("group route should exist");
         assert_eq!(first.0, "cmcc-cluster");
         assert_eq!(first.1.host, "cmcc-01.example.com");
+        assert!(first.1.resolve_srv);
         assert_eq!(second.1.host, "cmcc-02.example.com");
+    }
+
+    #[test]
+    fn routing_defaults_srv_to_disabled_and_uses_minecraft_port_fallback() {
+        let routing: RoutingConfig = toml::from_str(
+            r#"
+            default_line = "global"
+
+            [lines.global]
+            host = "play.example.com"
+            resolve_srv = true
+            "#,
+        )
+        .expect("SRV routing configuration should parse");
+        routing
+            .validate()
+            .expect("SRV routing configuration should validate");
+
+        assert!(routing.lines["global"].resolve_srv);
+        assert_eq!(routing.lines["global"].port, 25565);
+    }
+
+    #[test]
+    fn routing_defaults_srv_to_false() {
+        let routing: RoutingConfig = toml::from_str(
+            r#"
+            default_line = "global"
+
+            [lines.global]
+            host = "play.example.com"
+            "#,
+        )
+        .expect("default SRV routing configuration should parse");
+        assert!(!routing.lines["global"].resolve_srv);
+    }
+
+    #[test]
+    fn routing_accepts_srv_compatibility_aliases_per_target() {
+        for field in ["minecraft_srv", "srv"] {
+            let source = format!(
+                r#"
+                default_line = "global"
+
+                [lines.global]
+                host = "play.example.com"
+                {field} = true
+                "#
+            );
+            let routing: RoutingConfig =
+                toml::from_str(&source).expect("SRV compatibility field should parse");
+            assert!(routing.lines["global"].resolve_srv);
+        }
     }
 
     #[test]

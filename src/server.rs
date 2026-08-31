@@ -20,6 +20,7 @@ use uuid::Uuid;
 
 use crate::{
     config::{AppConfig, LineTarget},
+    dns::MinecraftDnsResolver,
     ip2region::{Ip2Region, IpLocation},
     language::Language,
     protocol::{
@@ -29,7 +30,7 @@ use crate::{
         parse_login_start, read_packet, write_packet,
     },
     runtime::RuntimeState,
-    security::{BlockReason, Security},
+    security::BlockReason,
 };
 
 pub async fn run(mut state_receiver: watch::Receiver<Arc<RuntimeState>>) -> Result<()> {
@@ -150,28 +151,10 @@ async fn handle_connection(
 
     match handshake.next_state {
         NextState::Status => {
-            handle_status(
-                &mut stream,
-                peer,
-                &state.config,
-                &state.security,
-                &state.language,
-                &location,
-                handshake,
-            )
-            .await?
+            handle_status(&mut stream, peer, state.as_ref(), &location, handshake).await?
         }
         NextState::Login => {
-            handle_login(
-                &mut stream,
-                peer,
-                &state.config,
-                &state.security,
-                &state.language,
-                &location,
-                handshake,
-            )
-            .await?
+            handle_login(&mut stream, peer, state.as_ref(), &location, handshake).await?
         }
     }
 
@@ -182,12 +165,14 @@ async fn handle_connection(
 async fn handle_status(
     stream: &mut BufStream<TcpStream>,
     peer: SocketAddr,
-    config: &AppConfig,
-    security: &Security,
-    language: &Language,
+    state: &RuntimeState,
     location: &IpLocation,
     handshake: Handshake,
 ) -> Result<()> {
+    let config = &state.config;
+    let dns = &state.dns;
+    let security = &state.security;
+    let language = &state.language;
     let max_frame_length = config.server.max_frame_length;
     let request = read_packet(stream, max_frame_length)
         .await?
@@ -211,11 +196,17 @@ async fn handle_status(
             .select_route_with_context(location, None, security, &balance_key)
         {
             Some((line, target)) => {
-                let target_address = format_target(&target);
-                match proxy_status_response(handshake.protocol_version, &target, max_frame_length)
-                    .await
+                let configured_target_address = format_target(&target);
+                match proxy_status_response(
+                    handshake.protocol_version,
+                    &target,
+                    dns,
+                    max_frame_length,
+                )
+                .await
                 {
-                    Ok((backend, payload)) => {
+                    Ok((backend, payload, resolved_target)) => {
+                        let target_address = format_target(&resolved_target);
                         debug!(
                             %peer,
                             node = %line,
@@ -233,7 +224,7 @@ async fn handle_status(
                         warn!(
                             %peer,
                             node = %line,
-                            target = %target_address,
+                            target = %configured_target_address,
                             ?error,
                             "{message}"
                         );
@@ -290,10 +281,14 @@ fn local_status_payload(config: &AppConfig, language: &Language) -> Result<Vec<u
 
 async fn proxy_status_response(
     protocol_version: i32,
-    target: &LineTarget,
+    configured_target: &LineTarget,
+    dns: &MinecraftDnsResolver,
     max_frame_length: usize,
-) -> Result<(BufStream<TcpStream>, Vec<u8>)> {
-    let target_address = format_target(target);
+) -> Result<(BufStream<TcpStream>, Vec<u8>, LineTarget)> {
+    let target = dns
+        .resolve_target(configured_target, configured_target.resolve_srv)
+        .await?;
+    let target_address = format_target(&target);
     let backend_stream = TcpStream::connect(&target_address).await?;
     backend_stream.set_nodelay(true)?;
     let mut backend = BufStream::new(backend_stream);
@@ -312,7 +307,7 @@ async fn proxy_status_response(
         ));
     }
 
-    Ok((backend, response.payload))
+    Ok((backend, response.payload, target))
 }
 
 async fn complete_backend_status_ping(
@@ -347,12 +342,14 @@ fn lookup_location(peer: SocketAddr, ip2region: &Ip2Region, language: &Language)
 async fn handle_login(
     stream: &mut BufStream<TcpStream>,
     peer: SocketAddr,
-    config: &AppConfig,
-    security: &Security,
-    language: &Language,
+    state: &RuntimeState,
     location: &IpLocation,
     handshake: Handshake,
 ) -> Result<()> {
+    let config = &state.config;
+    let dns = &state.dns;
+    let security = &state.security;
+    let language = &state.language;
     let Some(spec) = protocol::protocol_spec(handshake.protocol_version) else {
         let protocol_version = handshake.protocol_version.to_string();
         let supported = supported_protocols_description(&config.server.supported_protocols);
@@ -419,7 +416,21 @@ async fn handle_login(
         return Ok(());
     };
 
-    let target_address = format_target(&target);
+    let resolved_target = match dns.resolve_target(&target, target.resolve_srv).await {
+        Ok(target) => target,
+        Err(error) => {
+            warn!(
+                %peer,
+                host = %target.host,
+                ?error,
+                "Minecraft SRV target is unavailable"
+            );
+            let reason = language.render("disconnect.no_route", &[]);
+            send_login_disconnect(stream, &reason).await?;
+            return Ok(());
+        }
+    };
+    let target_address = format_target(&resolved_target);
 
     let profile_uuid = offline_uuid(&login_start.username);
     let login_success = encode_login_success(
@@ -441,7 +452,7 @@ async fn handle_login(
         ));
     }
 
-    let transfer = encode_transfer(&target.host, target.port);
+    let transfer = encode_transfer(&resolved_target.host, resolved_target.port);
     write_packet(stream, spec.config_transfer_packet_id, &transfer).await?;
 
     let transfer_message = language.render(

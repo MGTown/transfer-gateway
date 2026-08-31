@@ -1,4 +1,5 @@
 pub mod config;
+pub mod dns;
 pub mod ip2region;
 pub mod language;
 pub mod logging;
