@@ -1,0 +1,79 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - dev
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Run tests
+        run: cargo test --locked
+
+      - name: Run Clippy
+        run: cargo clippy --all-targets --all-features --locked -- -D warnings
+
+      - name: Build release binary
+        run: cargo build --release --locked
+
+      - name: Package release
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          package_dir="dist/mc-transfer-gateway"
+          mkdir -p "$package_dir"
+          install -m 0755 target/release/mc-transfer-gateway \
+            "$package_dir/mc-transfer-gateway"
+          cp README.md config.example.toml "$package_dir/"
+          cp -R vhosts "$package_dir/"
+
+          archive="dist/mc-transfer-gateway-linux-x86_64.tar.gz"
+          tar -C dist -czf "$archive" mc-transfer-gateway
+          sha256sum "$archive" > "$archive.sha256"
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMMIT_SHA: ${{ github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          tag="auto-${COMMIT_SHA}"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $tag already exists; nothing to publish."
+            exit 0
+          fi
+
+          gh release create "$tag" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$COMMIT_SHA" \
+            --title "Automatic build ${COMMIT_SHA:0:7}" \
+            --notes "Automatic build from commit ${COMMIT_SHA} on ${GITHUB_REF_NAME}." \
+            --prerelease \
+            --latest=false \
+            dist/mc-transfer-gateway-linux-x86_64.tar.gz \
+            dist/mc-transfer-gateway-linux-x86_64.tar.gz.sha256
