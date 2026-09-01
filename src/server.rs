@@ -153,7 +153,7 @@ async fn handle_connection(
         NextState::Status => {
             handle_status(&mut stream, peer, state.as_ref(), &location, handshake).await?
         }
-        NextState::Login => {
+        NextState::Login | NextState::Transfer => {
             handle_login(&mut stream, peer, state.as_ref(), &location, handshake).await?
         }
     }
@@ -190,50 +190,47 @@ async fn handle_status(
     }
 
     let balance_key = peer.ip().to_string();
-    let (mut backend, status_payload) =
-        match config
-            .routing
-            .select_route_with_context(location, None, security, &balance_key)
-        {
-            Some((line, target)) => {
-                let configured_target_address = format_target(&target);
-                match proxy_status_response(
-                    handshake.protocol_version,
-                    &target,
-                    dns,
-                    max_frame_length,
-                )
+    let (mut backend, status_payload) = match config.select_route_with_host_context(
+        location,
+        None,
+        Some(&handshake.host),
+        security,
+        &balance_key,
+    ) {
+        Some((line, target)) => {
+            let configured_target_address = format_target(&target);
+            match proxy_status_response(handshake.protocol_version, &target, dns, max_frame_length)
                 .await
-                {
-                    Ok((backend, payload, resolved_target)) => {
-                        let target_address = format_target(&resolved_target);
-                        debug!(
-                            %peer,
-                            node = %line,
-                            target = %target_address,
-                            "proxied backend server status"
-                        );
-                        (Some(backend), payload)
-                    }
-                    Err(error) => {
-                        let error_display = error.to_string();
-                        let message = language.render(
-                            "log.status_proxy_failed",
-                            &[("error", error_display.as_str())],
-                        );
-                        warn!(
-                            %peer,
-                            node = %line,
-                            target = %configured_target_address,
-                            ?error,
-                            "{message}"
-                        );
-                        (None, local_status_payload(config, language)?)
-                    }
+            {
+                Ok((backend, payload, resolved_target)) => {
+                    let target_address = format_target(&resolved_target);
+                    debug!(
+                        %peer,
+                        node = %line,
+                        target = %target_address,
+                        "proxied backend server status"
+                    );
+                    (Some(backend), payload)
+                }
+                Err(error) => {
+                    let error_display = error.to_string();
+                    let message = language.render(
+                        "log.status_proxy_failed",
+                        &[("error", error_display.as_str())],
+                    );
+                    warn!(
+                        %peer,
+                        node = %line,
+                        target = %configured_target_address,
+                        ?error,
+                        "{message}"
+                    );
+                    (None, local_status_payload(config, language)?)
                 }
             }
-            None => (None, local_status_payload(config, language)?),
-        };
+        }
+        None => (None, local_status_payload(config, language)?),
+    };
     write_packet(stream, 0, &status_payload).await?;
 
     let ping = read_packet(stream, max_frame_length)
@@ -405,9 +402,10 @@ async fn handle_login(
     }
 
     let balance_key = peer.ip().to_string();
-    let Some((line, target)) = config.routing.select_route_with_context(
+    let Some((line, target)) = config.select_route_with_host_context(
         location,
         Some(&login_start.username),
+        Some(&handshake.host),
         security,
         &balance_key,
     ) else {

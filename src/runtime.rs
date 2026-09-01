@@ -188,7 +188,7 @@ impl ConfigWatcher {
         )
         .context("unable to create configuration file watcher")?;
         watcher
-            .watch(watch_directory, RecursiveMode::NonRecursive)
+            .watch(watch_directory, RecursiveMode::Recursive)
             .with_context(|| {
                 format!(
                     "unable to watch configuration directory {}",
@@ -261,6 +261,10 @@ fn is_config_event(event: &Event, file_name: &OsString) -> bool {
     event.paths.iter().any(|path| {
         path.file_name()
             .is_some_and(|event_file_name| event_file_name == file_name)
+            || path
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("toml"))
     })
 }
 

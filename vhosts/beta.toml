@@ -1,0 +1,4 @@
+# Backend server for the beta virtual host.
+host = "beta-backend.example.com"
+port = 25565
+resolve_srv = false

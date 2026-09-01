@@ -154,11 +154,14 @@ fn trim_dns_root(host: String) -> String {
 
 fn select_srv_target(records: &[SrvTarget], sequence: u64) -> Option<SrvTarget> {
     let priority = records.iter().map(|record| record.priority).min()?;
-    let candidates: Vec<_> = records
+    let mut candidates: Vec<_> = records
         .iter()
         .filter(|record| record.priority == priority)
         .cloned()
         .collect();
+    // RFC 2782 places zero-weight records first so they retain the small
+    // fallback slot reserved by the inclusive weighted selection below.
+    candidates.sort_by_key(|record| record.weight != 0);
     let total_weight: u64 = candidates
         .iter()
         .map(|record| u64::from(record.weight))
@@ -223,8 +226,8 @@ mod tests {
     #[test]
     fn weighted_records_change_selection() {
         let records = [
-            target(10, 0, "zero.example.com"),
             target(10, 10, "weighted.example.com"),
+            target(10, 0, "zero.example.com"),
         ];
         assert_eq!(
             select_srv_target(&records, 0).unwrap().host,

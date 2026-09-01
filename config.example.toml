@@ -53,47 +53,8 @@ allowlist = []
 # residential users whose ISP database label contains a hosting keyword.
 vpn_isp_contains = []
 
-[routing]
-default_line = "global"
-
-[routing.lines.global]
-host = "global.example.com"
-port = 25565
-resolve_srv = false
-
-[routing.lines.cn]
-host = "cn.example.com"
-port = 25565
-resolve_srv = false
-
-[routing.lines.cn-telecom]
-host = "telecom.example.com"
-port = 25565
-resolve_srv = false
-
-[[routing.rules]]
-priority = 50
-line = "cn"
-countries = ["CN"]
-
-[[routing.rules]]
-priority = 100
-line = "cn-telecom"
-countries = ["CN"]
-isp_contains = ["China Telecom", "中国电信"]
-
-# [[routing.group]]
-# priority = 10
-# group_name = "cmcc-cluster"
-# mode = "round_robin"
-# port = 25565
-# resolve_srv = false
-# hosts = ["cmcc-node-01.mgtown.cn", "cmcc-node-02.mgtown.cn"]
-#
-# [[routing.rules]]
-# priority = 10
-# group = "cmcc-cluster"
-# players = ["herobrine", "dinnerbone"]
-#
-# countries = ["!CN"]
-# players = ["!blocked-player"]
+[vhosts]
+# The keys are the hostnames sent by Minecraft clients in the Handshake.
+default = "alpha"
+"alpha" = "./vhosts/alpha.toml"
+"beta" = "./vhosts/beta.toml"

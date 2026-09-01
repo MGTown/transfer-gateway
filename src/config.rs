@@ -21,6 +21,10 @@ use crate::{
 };
 
 pub const DEFAULT_CONFIG_TEMPLATE: &str = include_str!("../config.example.toml");
+pub const DEFAULT_VHOST_TEMPLATES: &[(&str, &str)] = &[
+    ("alpha", include_str!("../vhosts/alpha.toml")),
+    ("beta", include_str!("../vhosts/beta.toml")),
+];
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct AppConfig {
@@ -29,7 +33,10 @@ pub struct AppConfig {
     pub ip2region: Ip2RegionConfig,
     #[serde(default)]
     pub security: SecurityConfig,
-    pub routing: RoutingConfig,
+    #[serde(default)]
+    pub routing: Option<RoutingConfig>,
+    #[serde(default)]
+    pub vhosts: Option<VhostsConfig>,
     #[serde(default)]
     pub language: LanguageConfig,
     #[serde(default)]
@@ -40,8 +47,11 @@ impl AppConfig {
     pub fn load(path: &Path) -> Result<Self> {
         let source = fs::read_to_string(path)
             .with_context(|| format!("unable to read configuration file {}", path.display()))?;
-        let config: Self = toml::from_str(&source)
+        let mut config: Self = toml::from_str(&source)
             .with_context(|| format!("invalid TOML in {}", path.display()))?;
+        if let Some(vhosts) = config.vhosts.as_mut() {
+            vhosts.load(path)?;
+        }
         config.validate()?;
         Ok(config)
     }
@@ -55,9 +65,41 @@ impl AppConfig {
         self.server.validate()?;
         self.ip2region.validate()?;
         self.security.validate()?;
-        self.routing.validate()?;
+        match (&self.routing, &self.vhosts) {
+            (Some(_), Some(_)) => bail!("configure either routing or vhosts, not both"),
+            (Some(routing), None) => routing.validate()?,
+            (None, Some(vhosts)) => vhosts.validate()?,
+            (None, None) => bail!("routing or vhosts must be configured"),
+        }
         self.language.validate()?;
         Ok(())
+    }
+
+    pub fn select_route_with_host_context(
+        &self,
+        location: &IpLocation,
+        player: Option<&str>,
+        request_host: Option<&str>,
+        security: &Security,
+        balance_key: &str,
+    ) -> Option<(String, LineTarget)> {
+        if let Some(vhosts) = &self.vhosts {
+            return vhosts.select_route_with_context(
+                location,
+                player,
+                request_host,
+                security,
+                balance_key,
+            );
+        }
+
+        self.routing.as_ref()?.select_route_with_host_context(
+            location,
+            player,
+            request_host,
+            security,
+            balance_key,
+        )
     }
 }
 
@@ -356,6 +398,151 @@ impl LoggingConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub struct VhostsConfig {
+    #[serde(default)]
+    pub default: String,
+    #[serde(flatten, default)]
+    pub files: BTreeMap<String, PathBuf>,
+    #[serde(skip, default)]
+    routes: BTreeMap<String, RoutingConfig>,
+}
+
+impl VhostsConfig {
+    fn load(&mut self, config_path: &Path) -> Result<()> {
+        self.routes.clear();
+        for (name, configured_path) in &self.files {
+            if configured_path.as_os_str().is_empty() {
+                bail!("vhosts.{name} must contain a configuration file path");
+            }
+            let path = resolve_relative_path(config_path, configured_path);
+            let routing = load_vhost_routing(&path).with_context(|| {
+                format!("unable to load vhost '{name}' from {}", path.display())
+            })?;
+            self.routes.insert(name.clone(), routing);
+        }
+        Ok(())
+    }
+
+    fn validate(&self) -> Result<()> {
+        if self.files.is_empty() {
+            bail!("vhosts must contain at least one host mapping");
+        }
+        if self.default.trim().is_empty() {
+            bail!("vhosts.default must not be empty");
+        }
+
+        let default_exists = self
+            .files
+            .keys()
+            .any(|name| normalize_host(name).eq_ignore_ascii_case(normalize_host(&self.default)));
+        if !default_exists {
+            bail!("vhosts.default '{}' is not present in vhosts", self.default);
+        }
+
+        let mut normalized_names = Vec::with_capacity(self.files.len());
+        for name in self.files.keys() {
+            let normalized_name = normalize_host(name);
+            if normalized_name.is_empty() {
+                bail!("vhosts contains an empty host name");
+            }
+            if normalized_name.len() > 255 {
+                bail!("vhosts host name '{}' must be at most 255 bytes", name);
+            }
+            if normalized_names
+                .iter()
+                .any(|previous: &&str| previous.eq_ignore_ascii_case(normalized_name))
+            {
+                bail!("vhosts host name '{}' is duplicated", name);
+            }
+            normalized_names.push(normalized_name);
+
+            let routing = self.routes.get(name).ok_or_else(|| {
+                anyhow::anyhow!("vhosts.{name} has not been loaded from its configuration file")
+            })?;
+            routing
+                .validate()
+                .with_context(|| format!("invalid routing configuration for vhost '{name}'"))?;
+        }
+        Ok(())
+    }
+
+    fn select_route_with_context(
+        &self,
+        location: &IpLocation,
+        player: Option<&str>,
+        request_host: Option<&str>,
+        security: &Security,
+        balance_key: &str,
+    ) -> Option<(String, LineTarget)> {
+        let (vhost_name, routing) = self.select_routing(request_host)?;
+        let (line_name, target) = routing.select_route_with_host_context(
+            location,
+            player,
+            request_host,
+            security,
+            balance_key,
+        )?;
+        Some((format!("{vhost_name}/{line_name}"), target))
+    }
+
+    fn select_routing(&self, request_host: Option<&str>) -> Option<(&str, &RoutingConfig)> {
+        if let Some(request_host) = request_host {
+            let request_host = normalize_host(request_host);
+            if let Some((name, routing)) = self
+                .routes
+                .iter()
+                .find(|(name, _)| normalize_host(name).eq_ignore_ascii_case(request_host))
+            {
+                return Some((name.as_str(), routing));
+            }
+        }
+
+        self.routes
+            .iter()
+            .find(|(name, _)| {
+                normalize_host(name).eq_ignore_ascii_case(normalize_host(&self.default))
+            })
+            .map(|(name, routing)| (name.as_str(), routing))
+    }
+}
+
+fn load_vhost_routing(path: &Path) -> Result<RoutingConfig> {
+    let source = fs::read_to_string(path)
+        .with_context(|| format!("unable to read vhost configuration file {}", path.display()))?;
+    let mut document: toml::Value = toml::from_str(&source).with_context(|| {
+        format!(
+            "invalid TOML in vhost configuration file {}",
+            path.display()
+        )
+    })?;
+
+    if let Some(table) = document.as_table_mut()
+        && let Some(routing) = table.remove("routing")
+    {
+        document = routing;
+    }
+
+    let is_single_target = document.as_table().is_some_and(|table| {
+        table.contains_key("host")
+            && !table.contains_key("default_line")
+            && !table.contains_key("lines")
+            && !table.contains_key("rules")
+            && !table.contains_key("group")
+            && !table.contains_key("groups")
+    });
+    if is_single_target {
+        let target: LineTarget = document
+            .try_into()
+            .context("invalid single-target vhost configuration")?;
+        return Ok(RoutingConfig::from_single_target(target));
+    }
+
+    document
+        .try_into()
+        .context("invalid routing configuration in vhost file")
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct RoutingConfig {
     #[serde(default = "default_line")]
     pub default_line: String,
@@ -368,6 +555,17 @@ pub struct RoutingConfig {
 }
 
 impl RoutingConfig {
+    fn from_single_target(target: LineTarget) -> Self {
+        let mut lines = BTreeMap::new();
+        lines.insert("default".to_owned(), target);
+        Self {
+            default_line: "default".to_owned(),
+            lines,
+            rules: Vec::new(),
+            group: Vec::new(),
+        }
+    }
+
     fn validate(&self) -> Result<()> {
         if self.lines.is_empty() && self.group.is_empty() {
             bail!("routing.lines or routing.group must contain at least one target");
@@ -429,8 +627,16 @@ impl RoutingConfig {
     }
 
     pub fn select_route<'a>(&'a self, location: &IpLocation) -> Option<(&'a str, &'a LineTarget)> {
+        self.select_route_for_host(location, None)
+    }
+
+    pub fn select_route_for_host<'a>(
+        &'a self,
+        location: &IpLocation,
+        request_host: Option<&str>,
+    ) -> Option<(&'a str, &'a LineTarget)> {
         let line_name = self
-            .select_matching_rule(location, None, None)
+            .select_matching_rule(location, None, request_host, None)
             .and_then(|rule| rule.line_target_name(self))
             .unwrap_or(self.default_line.as_str());
         self.lines
@@ -445,7 +651,20 @@ impl RoutingConfig {
         security: &Security,
         balance_key: &str,
     ) -> Option<(String, LineTarget)> {
-        if let Some(rule) = self.select_matching_rule(location, player, Some(security)) {
+        self.select_route_with_host_context(location, player, None, security, balance_key)
+    }
+
+    pub fn select_route_with_host_context(
+        &self,
+        location: &IpLocation,
+        player: Option<&str>,
+        request_host: Option<&str>,
+        security: &Security,
+        balance_key: &str,
+    ) -> Option<(String, LineTarget)> {
+        if let Some(rule) =
+            self.select_matching_rule(location, player, request_host, Some(security))
+        {
             if let Some(line_name) = rule.line_target_name(self)
                 && let Some(target) = self.lines.get(line_name)
             {
@@ -468,12 +687,13 @@ impl RoutingConfig {
         &'a self,
         location: &IpLocation,
         player: Option<&str>,
+        request_host: Option<&str>,
         security: Option<&Security>,
     ) -> Option<&'a RouteRule> {
         let mut selected: Option<(i32, usize, &RouteRule)> = None;
 
         for (index, rule) in self.rules.iter().enumerate() {
-            if !rule.matches(location, player, security) {
+            if !rule.matches(location, player, request_host, security) {
                 continue;
             }
 
@@ -612,6 +832,10 @@ pub struct RouteRule {
     pub line: String,
     #[serde(default, alias = "group_name")]
     pub group: Option<String>,
+    #[serde(default, alias = "hostnames", alias = "domains")]
+    pub hosts: Vec<String>,
+    #[serde(default, alias = "not_hostnames", alias = "not_domains")]
+    pub not_hosts: Vec<String>,
     #[serde(default)]
     pub countries: Vec<String>,
     #[serde(default, alias = "subdivisions")]
@@ -651,17 +875,21 @@ impl RouteRule {
         &self,
         location: &IpLocation,
         player: Option<&str>,
+        request_host: Option<&str>,
         security: Option<&Security>,
     ) -> bool {
-        matches_text_list(
-            &self.countries,
-            &self.not_countries,
-            location.country_code.as_deref(),
-        ) && matches_text_list(
-            &self.provinces,
-            &self.not_provinces,
-            location.province.as_deref(),
-        ) && matches_text_list(&self.cities, &self.not_cities, location.city.as_deref())
+        matches_host_list(&self.hosts, &self.not_hosts, request_host)
+            && matches_text_list(
+                &self.countries,
+                &self.not_countries,
+                location.country_code.as_deref(),
+            )
+            && matches_text_list(
+                &self.provinces,
+                &self.not_provinces,
+                location.province.as_deref(),
+            )
+            && matches_text_list(&self.cities, &self.not_cities, location.city.as_deref())
             && matches_contains_list(
                 &self.isp_contains,
                 &self.not_isp_contains,
@@ -745,6 +973,34 @@ fn matches_text_list(positive: &[String], negative: &[String], actual: Option<&s
                 .any(|expected| expected.eq_ignore_ascii_case(actual))
     });
     positive_matches && !negative_matches
+}
+
+fn matches_host_list(positive: &[String], negative: &[String], actual: Option<&str>) -> bool {
+    let actual = actual.map(normalize_host);
+    let has_positive = positive
+        .iter()
+        .any(|expected| bang_negation(expected).is_none());
+    let positive_matches = !has_positive
+        || actual.is_some_and(|actual| {
+            positive.iter().any(|expected| {
+                bang_negation(expected).is_none()
+                    && normalize_host(expected).eq_ignore_ascii_case(actual)
+            })
+        });
+    let negative_matches = actual.is_some_and(|actual| {
+        negative
+            .iter()
+            .any(|expected| normalize_host(matcher_value(expected)).eq_ignore_ascii_case(actual))
+            || positive
+                .iter()
+                .filter_map(|expected| bang_negation(expected))
+                .any(|expected| normalize_host(expected).eq_ignore_ascii_case(actual))
+    });
+    positive_matches && !negative_matches
+}
+
+fn normalize_host(host: &str) -> &str {
+    host.trim_end_matches('.')
 }
 
 fn matches_contains_list(positive: &[String], negative: &[String], actual: Option<&str>) -> bool {
@@ -1038,6 +1294,48 @@ pub fn ensure_config_file(path: &Path) -> Result<bool> {
     Ok(true)
 }
 
+pub fn ensure_vhost_files(config_path: &Path) -> Result<()> {
+    let directory = config_directory(config_path).join("vhosts");
+    fs::create_dir_all(&directory).with_context(|| {
+        format!(
+            "unable to create vhost configuration directory {}",
+            directory.display()
+        )
+    })?;
+
+    for (name, template) in DEFAULT_VHOST_TEMPLATES {
+        let path = directory.join(format!("{name}.toml"));
+        let mut file = match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "unable to create vhost configuration file {}",
+                        path.display()
+                    )
+                });
+            }
+        };
+        file.write_all(template.as_bytes()).with_context(|| {
+            format!(
+                "unable to write vhost configuration file {}",
+                path.display()
+            )
+        })?;
+        file.flush().with_context(|| {
+            format!(
+                "unable to flush vhost configuration file {}",
+                path.display()
+            )
+        })?;
+        file.sync_all().with_context(|| {
+            format!("unable to sync vhost configuration file {}", path.display())
+        })?;
+    }
+    Ok(())
+}
+
 pub fn config_directory(path: &Path) -> &Path {
     path.parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -1271,10 +1569,157 @@ mod tests {
     }
 
     #[test]
+    fn route_selects_target_by_requested_host() {
+        let routing: RoutingConfig = toml::from_str(
+            r#"
+            default_line = "global"
+
+            [lines.global]
+            host = "global.example.com"
+            port = 25565
+
+            [lines.alpha]
+            host = "alpha-backend.example.com"
+            port = 25565
+
+            [lines.beta]
+            host = "beta-backend.example.com"
+            port = 25565
+
+            [[rules]]
+            priority = 100
+            line = "alpha"
+            hosts = ["alpha.example.com"]
+
+            [[rules]]
+            priority = 100
+            line = "beta"
+            hosts = ["beta.example.com", "beta.example.net"]
+            "#,
+        )
+        .expect("host routing configuration should parse");
+        routing
+            .validate()
+            .expect("host routing configuration should validate");
+        let security = security();
+
+        let alpha = routing
+            .select_route_with_host_context(
+                &location("JP", "Example ISP"),
+                None,
+                Some("ALPHA.EXAMPLE.COM."),
+                &security,
+                "203.0.113.8",
+            )
+            .expect("host route should exist");
+        assert_eq!(alpha.0, "alpha");
+
+        let beta = routing
+            .select_route_with_host_context(
+                &location("JP", "Example ISP"),
+                None,
+                Some("beta.example.net"),
+                &security,
+                "203.0.113.8",
+            )
+            .expect("host route should exist");
+        assert_eq!(beta.0, "beta");
+
+        let fallback = routing
+            .select_route_with_host_context(
+                &location("JP", "Example ISP"),
+                None,
+                Some("unknown.example.com"),
+                &security,
+                "203.0.113.8",
+            )
+            .expect("default route should exist");
+        assert_eq!(fallback.0, "global");
+    }
+
+    #[test]
+    fn route_supports_requested_host_negation() {
+        let routing: RoutingConfig = toml::from_str(
+            r#"
+            default_line = "global"
+
+            [lines.global]
+            host = "global.example.com"
+            port = 25565
+
+            [lines.special]
+            host = "special-backend.example.com"
+            port = 25565
+
+            [[rules]]
+            priority = 100
+            line = "special"
+            not_hosts = ["blocked.example.com"]
+            "#,
+        )
+        .expect("host negation configuration should parse");
+        routing
+            .validate()
+            .expect("host negation configuration should validate");
+        let security = security();
+
+        let allowed = routing
+            .select_route_with_host_context(
+                &location("JP", "Example ISP"),
+                None,
+                Some("allowed.example.com"),
+                &security,
+                "203.0.113.8",
+            )
+            .expect("default route should exist");
+        assert_eq!(allowed.0, "special");
+
+        let blocked = routing
+            .select_route_with_host_context(
+                &location("JP", "Example ISP"),
+                None,
+                Some("blocked.example.com"),
+                &security,
+                "203.0.113.8",
+            )
+            .expect("default route should exist");
+        assert_eq!(blocked.0, "global");
+    }
+
+    #[test]
     fn default_config_template_is_valid() {
-        let config: AppConfig =
-            toml::from_str(DEFAULT_CONFIG_TEMPLATE).expect("default template should parse");
-        config.validate().expect("default template should validate");
+        let config_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("config.example.toml");
+        AppConfig::load(&config_path).expect("default template should load and validate");
+    }
+
+    #[test]
+    fn vhosts_select_routing_file_by_requested_host() {
+        let config_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("config.example.toml");
+        let config = AppConfig::load(&config_path).expect("vhost template should load");
+        let security = security();
+
+        let beta = config
+            .select_route_with_host_context(
+                &location("JP", "Example ISP"),
+                None,
+                Some("BETA."),
+                &security,
+                "203.0.113.8",
+            )
+            .expect("beta vhost should be selected");
+        assert_eq!(beta.0, "beta/default");
+        assert_eq!(beta.1.host, "beta-backend.example.com");
+
+        let fallback = config
+            .select_route_with_host_context(
+                &location("JP", "Example ISP"),
+                None,
+                Some("unknown.example.com"),
+                &security,
+                "203.0.113.8",
+            )
+            .expect("default vhost should be selected");
+        assert_eq!(fallback.0, "alpha/default");
     }
 
     #[test]

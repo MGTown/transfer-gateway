@@ -1,0 +1,4 @@
+# Backend server for the alpha virtual host.
+host = "alpha-backend.example.com"
+port = 25565
+resolve_srv = false

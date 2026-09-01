@@ -23,6 +23,7 @@ async fn main() -> Result<()> {
             config::config_directory(&config_path).join(language::DEFAULT_LANGUAGE_DIRECTORY);
         language::ensure_file(&language_directory.join("zh-CN.toml"), "zh-CN")?;
         language::ensure_file(&language_directory.join("en-US.toml"), "en-US")?;
+        config::ensure_vhost_files(&config_path)?;
 
         let bootstrap = Language::builtin(language::DEFAULT_LOCALE)?;
         let config_display = config_path.display().to_string();

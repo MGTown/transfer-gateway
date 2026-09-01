@@ -15,7 +15,9 @@ pub const CONFIG_TRANSFER_PACKET_ID_26_3: i32 = 0x0C;
 pub const FIRST_TRANSFER_SNAPSHOT_PROTOCOL: i32 = 1_073_741_995;
 pub const LATEST_SNAPSHOT_PROTOCOL: i32 = 1_073_742_156;
 pub const LAST_STRICT_ERROR_HANDLING_SNAPSHOT_PROTOCOL: i32 = 1_073_742_033;
+pub const FIRST_SESSION_ID_RELEASE_PROTOCOL: i32 = 776;
 pub const FIRST_SESSION_ID_SNAPSHOT_PROTOCOL: i32 = 1_073_742_149;
+pub const FIRST_TRANSFER_PACKET_ID_26_3_SNAPSHOT_PROTOCOL: i32 = 1_073_742_149;
 
 pub const SUPPORTED_VERSION_RANGE: &str = "Java 1.20.5 through 26.3 Snapshot 10";
 
@@ -71,13 +73,16 @@ pub fn protocol_spec(version: i32) -> Option<ProtocolSpec> {
         768..=776 => false,
         _ => version <= LAST_STRICT_ERROR_HANDLING_SNAPSHOT_PROTOCOL,
     };
-    let login_success_has_session_id = is_snapshot && version >= FIRST_SESSION_ID_SNAPSHOT_PROTOCOL;
+    let login_success_has_session_id = version == FIRST_SESSION_ID_RELEASE_PROTOCOL
+        || (is_snapshot && version >= FIRST_SESSION_ID_SNAPSHOT_PROTOCOL);
 
     Some(ProtocolSpec {
         version,
         login_success_has_strict_error_handling,
         login_success_has_session_id,
-        config_transfer_packet_id: if login_success_has_session_id {
+        config_transfer_packet_id: if is_snapshot
+            && version >= FIRST_TRANSFER_PACKET_ID_26_3_SNAPSHOT_PROTOCOL
+        {
             CONFIG_TRANSFER_PACKET_ID_26_3
         } else {
             CONFIG_TRANSFER_PACKET_ID
@@ -93,6 +98,7 @@ pub fn is_supported_protocol(version: i32) -> bool {
 pub enum NextState {
     Status,
     Login,
+    Transfer,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -179,6 +185,7 @@ pub fn parse_handshake(packet: &Packet) -> Result<Handshake, ProtocolError> {
     let next_state = match reader.read_varint()? {
         1 => NextState::Status,
         2 => NextState::Login,
+        3 => NextState::Transfer,
         _ => {
             return Err(ProtocolError::InvalidValue(
                 "unsupported handshake next state",
@@ -551,4 +558,71 @@ async fn read_varint_async<R: AsyncRead + Unpin>(
     }
 
     Err(ProtocolError::VarIntTooLong)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn uuid(byte: u8) -> Uuid {
+        Uuid::from_bytes([byte; 16])
+    }
+
+    #[test]
+    fn login_success_fields_match_protocol_boundaries() {
+        let legacy = protocol_spec(767).expect("protocol 767 should be supported");
+        assert!(legacy.login_success_has_strict_error_handling);
+        assert!(!legacy.login_success_has_session_id);
+        assert_eq!(legacy.config_transfer_packet_id, CONFIG_TRANSFER_PACKET_ID);
+
+        let modern = protocol_spec(768).expect("protocol 768 should be supported");
+        assert!(!modern.login_success_has_strict_error_handling);
+        assert!(!modern.login_success_has_session_id);
+        assert_eq!(modern.config_transfer_packet_id, CONFIG_TRANSFER_PACKET_ID);
+
+        let release_26_2 =
+            protocol_spec(FIRST_SESSION_ID_RELEASE_PROTOCOL).expect("protocol 776 should exist");
+        assert!(!release_26_2.login_success_has_strict_error_handling);
+        assert!(release_26_2.login_success_has_session_id);
+        assert_eq!(
+            release_26_2.config_transfer_packet_id,
+            CONFIG_TRANSFER_PACKET_ID
+        );
+
+        let older_snapshot = protocol_spec(FIRST_TRANSFER_SNAPSHOT_PROTOCOL)
+            .expect("the first transfer snapshot should be supported");
+        assert!(!older_snapshot.login_success_has_session_id);
+        assert_eq!(
+            older_snapshot.config_transfer_packet_id,
+            CONFIG_TRANSFER_PACKET_ID
+        );
+
+        let snapshot_26_3 = protocol_spec(FIRST_SESSION_ID_SNAPSHOT_PROTOCOL)
+            .expect("the first session-id snapshot should be supported");
+        assert!(snapshot_26_3.login_success_has_session_id);
+        assert_eq!(
+            snapshot_26_3.config_transfer_packet_id,
+            CONFIG_TRANSFER_PACKET_ID_26_3
+        );
+    }
+
+    #[test]
+    fn protocol_776_login_success_contains_session_id() {
+        let spec = protocol_spec(FIRST_SESSION_ID_RELEASE_PROTOCOL).unwrap();
+        let session_id = uuid(0x22);
+        let payload = encode_login_success(spec, uuid(0x11), "Steve", false, session_id);
+
+        assert_eq!(&payload[payload.len() - 16..], session_id.as_bytes());
+    }
+
+    #[test]
+    fn parses_transfer_handshake_as_login() {
+        let packet = Packet {
+            id: HANDSHAKE_PACKET_ID,
+            payload: encode_handshake(776, "gateway.example.com", 25565, 3),
+        };
+
+        let handshake = parse_handshake(&packet).expect("transfer handshake should parse");
+        assert_eq!(handshake.next_state, NextState::Transfer);
+    }
 }
