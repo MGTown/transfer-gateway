@@ -297,17 +297,19 @@ impl Default for SecurityConfig {
 impl SecurityConfig {
     fn validate(&self) -> Result<()> {
         if (self.auto_download || self.auto_update) && self.enabled {
-            if configured_path(self.tor_exit_list.as_deref()) {
+            if self.block_tor && configured_path(self.tor_exit_list.as_deref()) {
                 validate_http_url("security.tor_exit_list_url", &self.tor_exit_list_url)?;
             }
-            if configured_path(self.spam_list.as_deref()) {
+            if self.block_spam && configured_path(self.spam_list.as_deref()) {
                 validate_http_url("security.spam_list_url", &self.spam_list_url)?;
             }
-            if configured_path(self.vpn_ipv4_list.as_deref()) {
-                validate_http_url("security.vpn_ipv4_list_url", &self.vpn_ipv4_list_url)?;
-            }
-            if configured_path(self.vpn_ipv6_list.as_deref()) {
-                validate_http_url("security.vpn_ipv6_list_url", &self.vpn_ipv6_list_url)?;
+            if self.block_vpn {
+                if configured_path(self.vpn_ipv4_list.as_deref()) {
+                    validate_http_url("security.vpn_ipv4_list_url", &self.vpn_ipv4_list_url)?;
+                }
+                if configured_path(self.vpn_ipv6_list.as_deref()) {
+                    validate_http_url("security.vpn_ipv6_list_url", &self.vpn_ipv6_list_url)?;
+                }
             }
         }
         if self.auto_update && self.update_interval_secs == 0 {

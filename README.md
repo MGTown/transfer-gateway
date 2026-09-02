@@ -164,8 +164,9 @@ allowlist = [
 ]
 ~~~
 
-名单即使没有开启对应的 block_*，仍可用于路由规则中的 vpn、tor 和 spam 条件。
-vpn_isp_contains 可按 ip2region 的 ISP 文本匹配 VPN 关键词。
+名单即使没有开启对应的 block_*，只要文件已经存在，仍可用于路由规则中的 vpn、tor
+和 spam 条件；自动下载和更新只维护对应 block_* 已开启的名单。vpn_isp_contains 可按
+ip2region 的 ISP 文本匹配 VPN 关键词。
 
 默认名单地址写在 config.example.toml 中，包括 [Tor Project](https://check.torproject.org/torbulkexitlist)、
 [X4BNet](https://github.com/X4BNet/lists_vpn) 和 USTC Spam IP 列表。

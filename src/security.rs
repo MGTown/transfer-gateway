@@ -174,47 +174,10 @@ pub async fn download_missing(config: &SecurityConfig) -> Result<Vec<DownloadedL
         return Ok(Vec::new());
     }
 
-    let mut pending = Vec::new();
-    if let Some(path) = configured_path(config.tor_exit_list.as_deref())
-        && !path.exists()
-    {
-        pending.push(DownloadItem {
-            kind: "Tor exit",
-            format: ListFormat::Ip,
-            path: path.to_owned(),
-            url: config.tor_exit_list_url.clone(),
-        });
-    }
-    if let Some(path) = configured_path(config.spam_list.as_deref())
-        && !path.exists()
-    {
-        pending.push(DownloadItem {
-            kind: "Spam IP",
-            format: ListFormat::Network,
-            path: path.to_owned(),
-            url: config.spam_list_url.clone(),
-        });
-    }
-    if let Some(path) = configured_path(config.vpn_ipv4_list.as_deref())
-        && !path.exists()
-    {
-        pending.push(DownloadItem {
-            kind: "VPN IPv4",
-            format: ListFormat::Network,
-            path: path.to_owned(),
-            url: config.vpn_ipv4_list_url.clone(),
-        });
-    }
-    if let Some(path) = configured_path(config.vpn_ipv6_list.as_deref())
-        && !path.exists()
-    {
-        pending.push(DownloadItem {
-            kind: "VPN IPv6",
-            format: ListFormat::Network,
-            path: path.to_owned(),
-            url: config.vpn_ipv6_list_url.clone(),
-        });
-    }
+    let pending = automatic_list_items(config)
+        .into_iter()
+        .filter(|item| !item.path.exists())
+        .collect::<Vec<_>>();
 
     if pending.is_empty() {
         return Ok(Vec::new());
@@ -260,39 +223,7 @@ pub async fn update(config: &SecurityConfig) -> Result<UpdateReport> {
         return Ok(report);
     }
 
-    let mut pending = Vec::new();
-    if let Some(path) = configured_path(config.tor_exit_list.as_deref()) {
-        pending.push(DownloadItem {
-            kind: "Tor exit",
-            format: ListFormat::Ip,
-            path: path.to_owned(),
-            url: config.tor_exit_list_url.clone(),
-        });
-    }
-    if let Some(path) = configured_path(config.spam_list.as_deref()) {
-        pending.push(DownloadItem {
-            kind: "Spam IP",
-            format: ListFormat::Network,
-            path: path.to_owned(),
-            url: config.spam_list_url.clone(),
-        });
-    }
-    if let Some(path) = configured_path(config.vpn_ipv4_list.as_deref()) {
-        pending.push(DownloadItem {
-            kind: "VPN IPv4",
-            format: ListFormat::Network,
-            path: path.to_owned(),
-            url: config.vpn_ipv4_list_url.clone(),
-        });
-    }
-    if let Some(path) = configured_path(config.vpn_ipv6_list.as_deref()) {
-        pending.push(DownloadItem {
-            kind: "VPN IPv6",
-            format: ListFormat::Network,
-            path: path.to_owned(),
-            url: config.vpn_ipv6_list_url.clone(),
-        });
-    }
+    let pending = automatic_list_items(config);
     if pending.is_empty() {
         return Ok(report);
     }
@@ -333,6 +264,53 @@ struct DownloadItem {
     format: ListFormat,
     path: PathBuf,
     url: String,
+}
+
+// A disabled blocklist can still be loaded from disk for route predicates,
+// but automatic network operations only maintain lists used for blocking.
+fn automatic_list_items(config: &SecurityConfig) -> Vec<DownloadItem> {
+    let mut items = Vec::new();
+
+    if config.block_tor
+        && let Some(path) = configured_path(config.tor_exit_list.as_deref())
+    {
+        items.push(DownloadItem {
+            kind: "Tor exit",
+            format: ListFormat::Ip,
+            path: path.to_owned(),
+            url: config.tor_exit_list_url.clone(),
+        });
+    }
+    if config.block_spam
+        && let Some(path) = configured_path(config.spam_list.as_deref())
+    {
+        items.push(DownloadItem {
+            kind: "Spam IP",
+            format: ListFormat::Network,
+            path: path.to_owned(),
+            url: config.spam_list_url.clone(),
+        });
+    }
+    if config.block_vpn {
+        if let Some(path) = configured_path(config.vpn_ipv4_list.as_deref()) {
+            items.push(DownloadItem {
+                kind: "VPN IPv4",
+                format: ListFormat::Network,
+                path: path.to_owned(),
+                url: config.vpn_ipv4_list_url.clone(),
+            });
+        }
+        if let Some(path) = configured_path(config.vpn_ipv6_list.as_deref()) {
+            items.push(DownloadItem {
+                kind: "VPN IPv6",
+                format: ListFormat::Network,
+                path: path.to_owned(),
+                url: config.vpn_ipv6_list_url.clone(),
+            });
+        }
+    }
+
+    items
 }
 
 async fn download_one(client: &Client, item: &DownloadItem) -> Result<bool> {
@@ -847,5 +825,79 @@ impl<const BITS: usize> IpTrie<BITS> {
 
     fn len(&self) -> usize {
         self.entries
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config_with_unique_paths(root: &Path) -> SecurityConfig {
+        SecurityConfig {
+            enabled: true,
+            block_vpn: false,
+            block_tor: false,
+            block_spam: true,
+            auto_download: true,
+            auto_update: true,
+            tor_exit_list: Some(root.join("tor.txt")),
+            tor_exit_list_url: "http://[invalid-tor".to_owned(),
+            spam_list: Some(root.join("spam.txt")),
+            spam_list_url: "http://[invalid-spam".to_owned(),
+            vpn_ipv4_list: Some(root.join("vpn-ipv4.txt")),
+            vpn_ipv4_list_url: "http://[invalid-vpn-ipv4".to_owned(),
+            vpn_ipv6_list: Some(root.join("vpn-ipv6.txt")),
+            vpn_ipv6_list_url: "http://[invalid-vpn-ipv6".to_owned(),
+            ..SecurityConfig::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn automatic_list_operations_ignore_disabled_blocklists() {
+        let root = std::env::temp_dir().join(format!(
+            "mc-transfer-gateway-security-test-{}",
+            Uuid::new_v4().simple()
+        ));
+        let config = config_with_unique_paths(&root);
+
+        let download_error = download_missing(&config)
+            .await
+            .expect_err("the enabled spam list should attempt its invalid URL");
+        let download_error = download_error.to_string();
+        assert!(download_error.contains("Spam IP"));
+        assert!(!download_error.contains("Tor exit"));
+        assert!(!download_error.contains("VPN IPv4"));
+        assert!(!download_error.contains("VPN IPv6"));
+
+        let report = update(&config)
+            .await
+            .expect("update should report item errors");
+        assert_eq!(report.errors.len(), 1);
+        assert!(report.errors[0].contains("Spam IP"));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn automatic_list_operations_skip_all_lists_when_all_blocks_are_disabled() {
+        let root = std::env::temp_dir().join(format!(
+            "mc-transfer-gateway-security-test-{}",
+            Uuid::new_v4().simple()
+        ));
+        let mut config = config_with_unique_paths(&root);
+        config.block_spam = false;
+
+        let downloaded = download_missing(&config)
+            .await
+            .expect("disabled blocklists should not be downloaded");
+        assert!(downloaded.is_empty());
+
+        let report = update(&config)
+            .await
+            .expect("disabled blocklists should not be updated");
+        assert!(report.updated.is_empty());
+        assert!(report.errors.is_empty());
+
+        let _ = std::fs::remove_dir_all(root);
     }
 }

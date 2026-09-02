@@ -35,6 +35,7 @@ block_vpn = true
 block_tor = true
 block_spam = true
 # auto_download only fills missing list files; auto_update periodically replaces changed lists.
+# Automatic download/update only applies to blocklists whose block_* option is true.
 auto_download = true
 # Periodically check and hot-apply changed lists.
 auto_update = true
