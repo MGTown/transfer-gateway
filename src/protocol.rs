@@ -9,17 +9,17 @@ pub const LOGIN_START_PACKET_ID: i32 = 0x00;
 pub const LOGIN_SUCCESS_PACKET_ID: i32 = 0x02;
 pub const LOGIN_ACKNOWLEDGED_PACKET_ID: i32 = 0x03;
 pub const LOGIN_DISCONNECT_PACKET_ID: i32 = 0x00;
-pub const CONFIG_TRANSFER_PACKET_ID: i32 = 0x0B;
-pub const CONFIG_TRANSFER_PACKET_ID_26_3: i32 = 0x0C;
+pub const CONFIG_TRANSFER_PACKET_ID: i32 = 0x0C;
+pub const CONFIG_TRANSFER_PACKET_ID_SNAPSHOT: i32 = 0x0D;
 
 pub const FIRST_TRANSFER_SNAPSHOT_PROTOCOL: i32 = 1_073_741_995;
 pub const LATEST_SNAPSHOT_PROTOCOL: i32 = 1_073_742_156;
 pub const LAST_STRICT_ERROR_HANDLING_SNAPSHOT_PROTOCOL: i32 = 1_073_742_033;
-pub const FIRST_SESSION_ID_RELEASE_PROTOCOL: i32 = 776;
+pub const FIRST_SESSION_ID_RELEASE_PROTOCOL: i32 = 777;
 pub const FIRST_SESSION_ID_SNAPSHOT_PROTOCOL: i32 = 1_073_742_149;
-pub const FIRST_TRANSFER_PACKET_ID_26_3_SNAPSHOT_PROTOCOL: i32 = 1_073_742_149;
+pub const FIRST_TRANSFER_PACKET_ID_SNAPSHOT_PROTOCOL: i32 = 1_073_742_149;
 
-pub const SUPPORTED_VERSION_RANGE: &str = "Java 1.20.5 through 26.3 Snapshot 10";
+pub const SUPPORTED_VERSION_RANGE: &str = "1.20.5 - 26.3";
 
 const MAX_VARINT_BYTES: usize = 5;
 
@@ -70,7 +70,7 @@ pub fn protocol_spec(version: i32) -> Option<ProtocolSpec> {
 
     let login_success_has_strict_error_handling = match version {
         766..=767 => true,
-        768..=776 => false,
+        768..=777 => false,
         _ => version <= LAST_STRICT_ERROR_HANDLING_SNAPSHOT_PROTOCOL,
     };
     let login_success_has_session_id = version == FIRST_SESSION_ID_RELEASE_PROTOCOL
@@ -81,9 +81,9 @@ pub fn protocol_spec(version: i32) -> Option<ProtocolSpec> {
         login_success_has_strict_error_handling,
         login_success_has_session_id,
         config_transfer_packet_id: if is_snapshot
-            && version >= FIRST_TRANSFER_PACKET_ID_26_3_SNAPSHOT_PROTOCOL
+            && version >= FIRST_TRANSFER_PACKET_ID_SNAPSHOT_PROTOCOL
         {
-            CONFIG_TRANSFER_PACKET_ID_26_3
+            CONFIG_TRANSFER_PACKET_ID_SNAPSHOT
         } else {
             CONFIG_TRANSFER_PACKET_ID
         },
