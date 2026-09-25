@@ -5,8 +5,8 @@ login_timeout_ms = 10000
 max_frame_length = 2097152
 
 supported_protocols = []
-status_version_name = "1.20.5 - 26.3 Snapshot 10"
-status_protocol = 1073742156
+status_version_name = "1.20.5 - 26.3"
+status_protocol = 777
 max_players = 100
 
 motd = "&6Transfer &aGateway\n&7IP routing gateway"

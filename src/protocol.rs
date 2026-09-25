@@ -9,15 +9,16 @@ pub const LOGIN_START_PACKET_ID: i32 = 0x00;
 pub const LOGIN_SUCCESS_PACKET_ID: i32 = 0x02;
 pub const LOGIN_ACKNOWLEDGED_PACKET_ID: i32 = 0x03;
 pub const LOGIN_DISCONNECT_PACKET_ID: i32 = 0x00;
-pub const CONFIG_TRANSFER_PACKET_ID: i32 = 0x0C;
-pub const CONFIG_TRANSFER_PACKET_ID_SNAPSHOT: i32 = 0x0D;
+pub const CONFIG_TRANSFER_PACKET_ID: i32 = 0x0B;
+pub const CONFIG_TRANSFER_PACKET_ID_26_3: i32 = 0x0C;
 
 pub const FIRST_TRANSFER_SNAPSHOT_PROTOCOL: i32 = 1_073_741_995;
 pub const LATEST_SNAPSHOT_PROTOCOL: i32 = 1_073_742_156;
 pub const LAST_STRICT_ERROR_HANDLING_SNAPSHOT_PROTOCOL: i32 = 1_073_742_033;
-pub const FIRST_SESSION_ID_RELEASE_PROTOCOL: i32 = 777;
+pub const FIRST_SESSION_ID_RELEASE_PROTOCOL: i32 = 776;
 pub const FIRST_SESSION_ID_SNAPSHOT_PROTOCOL: i32 = 1_073_742_149;
-pub const FIRST_TRANSFER_PACKET_ID_SNAPSHOT_PROTOCOL: i32 = 1_073_742_149;
+pub const FIRST_TRANSFER_PACKET_ID_26_3_SNAPSHOT_PROTOCOL: i32 = 1_073_742_149;
+pub const RELEASE_26_3_PROTOCOL: i32 = 777;
 
 pub const SUPPORTED_VERSION_RANGE: &str = "1.20.5 - 26.3";
 
@@ -60,7 +61,7 @@ pub struct ProtocolSpec {
 }
 
 pub fn protocol_spec(version: i32) -> Option<ProtocolSpec> {
-    let is_release = (766..=776).contains(&version);
+    let is_release = (766..=RELEASE_26_3_PROTOCOL).contains(&version);
     let is_snapshot =
         (FIRST_TRANSFER_SNAPSHOT_PROTOCOL..=LATEST_SNAPSHOT_PROTOCOL).contains(&version);
 
@@ -70,20 +71,20 @@ pub fn protocol_spec(version: i32) -> Option<ProtocolSpec> {
 
     let login_success_has_strict_error_handling = match version {
         766..=767 => true,
-        768..=777 => false,
+        768..=RELEASE_26_3_PROTOCOL => false,
         _ => version <= LAST_STRICT_ERROR_HANDLING_SNAPSHOT_PROTOCOL,
     };
-    let login_success_has_session_id = version == FIRST_SESSION_ID_RELEASE_PROTOCOL
+    let login_success_has_session_id = (is_release && version >= FIRST_SESSION_ID_RELEASE_PROTOCOL)
         || (is_snapshot && version >= FIRST_SESSION_ID_SNAPSHOT_PROTOCOL);
 
     Some(ProtocolSpec {
         version,
         login_success_has_strict_error_handling,
         login_success_has_session_id,
-        config_transfer_packet_id: if is_snapshot
-            && version >= FIRST_TRANSFER_PACKET_ID_SNAPSHOT_PROTOCOL
+        config_transfer_packet_id: if (is_release && version >= RELEASE_26_3_PROTOCOL)
+            || (is_snapshot && version >= FIRST_TRANSFER_PACKET_ID_26_3_SNAPSHOT_PROTOCOL)
         {
-            CONFIG_TRANSFER_PACKET_ID_SNAPSHOT
+            CONFIG_TRANSFER_PACKET_ID_26_3
         } else {
             CONFIG_TRANSFER_PACKET_ID
         },
@@ -589,6 +590,14 @@ mod tests {
             CONFIG_TRANSFER_PACKET_ID
         );
 
+        let release_26_3 = protocol_spec(RELEASE_26_3_PROTOCOL).expect("protocol 777 should exist");
+        assert!(!release_26_3.login_success_has_strict_error_handling);
+        assert!(release_26_3.login_success_has_session_id);
+        assert_eq!(
+            release_26_3.config_transfer_packet_id,
+            CONFIG_TRANSFER_PACKET_ID_26_3
+        );
+
         let older_snapshot = protocol_spec(FIRST_TRANSFER_SNAPSHOT_PROTOCOL)
             .expect("the first transfer snapshot should be supported");
         assert!(!older_snapshot.login_success_has_session_id);
@@ -604,11 +613,23 @@ mod tests {
             snapshot_26_3.config_transfer_packet_id,
             CONFIG_TRANSFER_PACKET_ID_26_3
         );
+
+        assert!(protocol_spec(765).is_none());
+        assert!(protocol_spec(778).is_none());
     }
 
     #[test]
     fn protocol_776_login_success_contains_session_id() {
         let spec = protocol_spec(FIRST_SESSION_ID_RELEASE_PROTOCOL).unwrap();
+        let session_id = uuid(0x22);
+        let payload = encode_login_success(spec, uuid(0x11), "Steve", false, session_id);
+
+        assert_eq!(&payload[payload.len() - 16..], session_id.as_bytes());
+    }
+
+    #[test]
+    fn protocol_777_login_success_contains_session_id() {
+        let spec = protocol_spec(RELEASE_26_3_PROTOCOL).unwrap();
         let session_id = uuid(0x22);
         let payload = encode_login_success(spec, uuid(0x11), "Steve", false, session_id);
 
@@ -624,5 +645,14 @@ mod tests {
 
         let handshake = parse_handshake(&packet).expect("transfer handshake should parse");
         assert_eq!(handshake.next_state, NextState::Transfer);
+
+        let packet_26_3 = Packet {
+            id: HANDSHAKE_PACKET_ID,
+            payload: encode_handshake(777, "gateway.example.com", 25565, 3),
+        };
+
+        let handshake_26_3 =
+            parse_handshake(&packet_26_3).expect("26.3 transfer handshake should parse");
+        assert_eq!(handshake_26_3.next_state, NextState::Transfer);
     }
 }

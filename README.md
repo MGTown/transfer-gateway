@@ -11,7 +11,7 @@
 选好线路后，网关发送 Transfer Packet，让客户端重新连接目标服务器。
 它不是流量代理，也不会转换协议版本。目标地址必须能被玩家直接访问。
 
-当前内置协议适配覆盖 Java 版 1.20.5 到 26.3 Snapshot 10。
+当前内置协议适配覆盖 Java 版 1.20.5 到 26.3。
 
 ## 快速开始
 
@@ -209,13 +209,13 @@ Transfer 不负责跨版本连接。例如 26.2 客户端重连时仍使用 prot
 
 - protocol 766：Java 1.20.5/1.20.6；
 - protocol 767：Java 1.21/1.21.1；
-- protocol 768 到 776：Java 1.21.2 到 26.2；
+- protocol 768 到 777：Java 1.21.2 到 26.3；
 - snapshot protocol 1073741995 到 1073742156：24w03a 到 26.3 Snapshot 10。
 
 登录包会随版本变化：
 
-- protocol 776（26.2）在 Login Finished 末尾增加 sessionId；
-- 26.3 Snapshot 3 起，Transfer Packet 的包 ID 从 0x0B 变为 0x0C；
+- protocol 776（26.2）及更高版本在 Login Finished 末尾增加 sessionId；
+- 26.3（以及 26.3 Snapshot 3 起），Transfer Packet 的包 ID 从 0x0B 变为 0x0C；
 - 快照版本可能继续变化，升级时应使用对应客户端测试。
 
 ## 重要限制

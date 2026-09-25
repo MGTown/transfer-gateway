@@ -1097,7 +1097,7 @@ fn default_status_version_name() -> String {
 }
 
 fn default_status_protocol() -> i32 {
-    protocol::LATEST_SNAPSHOT_PROTOCOL
+    protocol::RELEASE_26_3_PROTOCOL
 }
 
 fn default_max_players() -> u32 {
